@@ -12,7 +12,7 @@ copies. Local packing is always available; both upload channels are off until yo
 | What you asked for | How it is done |
 | --- | --- |
 | No outbound network until I say so | `webdavEnabled` and `githubEnabled` both default to **false**. A fresh install packs locally and touches nothing off-machine. |
-| Keep the archive on disk | `persistArchive` defaults to **true**. Artifacts land **encrypted** in `$DSH_HOME/dsh-sync-backup/artifacts/`. |
+| Keep the archive on disk | `persistArchive`'s **schema default** is `true`. The value that actually applies is resolved in layers (`config.json` > `cordis.patch.yml` > schema default), so read the effective value off the panel's Overview tab instead of assuming. Artifacts land **encrypted** in `$DSH_HOME/dsh-sync-backup/artifacts/`. |
 | Encrypt it | Every archive goes through **AES-256-GCM** before it touches disk or network. The key is generated on first run and never leaves the machine. |
 | Stop making me edit YAML | Changes made in the settings panel are written to `$DSH_HOME/dsh-sync-backup/config.json`, which **overrides** the patch file. Delete that file to fall back to defaults. |
 
@@ -130,7 +130,7 @@ defaults. The merge uses `??` rather than `||` — with `||` there would be no w
 `false`, `0`, or `""`, because they would be indistinguishable from absent.
 
 Key settings: `enabled`, `intervalHours` (12), `remoteIntervalHours` (0 = sync after every local pack),
-`keepLast` (7), `persistArchive` (true), `localKeepDays` (7), `restoreCheck` (false), `selectedPaths`
+`keepLast` (7), `persistArchive` (schema default true; patch/config can override), `localKeepDays` (7), `restoreCheck` (false), `selectedPaths`
 (empty = everything except `profiles`), `dryRun` (**true** — the upload gate), `webdavEnabled` /
 `webdavUrl` / `webdavUsername` / `webdavPath`, `githubEnabled` / `githubRepo` / `githubPath`,
 `uploadOnSchedule` (false). The full list is in `cordis.patch.yml`.
