@@ -182,7 +182,7 @@ const SECTION_TEXT = [
   "",
   "白名单口径：`AGENTS.md`、`dsh-auto-memory.json`、`memory/`、`skills/`、`storages/`、`task-board/`、`sessions/`、`dsh-config-manager/sync/` 顶层 `*.json`。",
   "**`.credentials.yaml` 永不进入归档**；收集阶段用白名单，白名单外路径不会被打包。",
-  "两个通道的上传顺序都是「先写归档与 manifest → 再写稳定副本 → 最后写索引」，索引永远指向已存在的对象；超出 keepLast 的最旧快照会被删除。",
+  "两个通道的上传顺序都是「先写归档与 manifest → 再写稳定副本 → 最后写索引 → 索引写成功后才 best-effort 删除超出 keepLast 的最旧快照」。新索引不再引用待删对象；反过来先删后写会留下指向已删对象的悬空索引。中途崩溃至多留下无引用的孤儿文件，下一轮清理自动收掉。",
   "GitHub 通道使用 contents API 写**私有仓库**：归档本体 + manifest + `latest.tar.gz` + `index.json` 共 4 个文件/次；`config.githubRepo` 留空即跳过该通道。",
 ].join("\n");
 
@@ -301,7 +301,7 @@ function apply(ctx, config) {
   }
 
   /**
-   * 上传一份归档（**索引最后写**，见 lib/webdav.js 的顺序契约）。
+   * 上传一份归档（内容对象全部写完后**索引最后写**；索引写成功后才 best-effort 删旧快照，见 lib/webdav.js 的顺序契约）。
    * 归档 id 形如 `20261008-201530-ab12cd34`（本地时间 + 随机后缀，天然按时间排序）。
    */
   async function uploadArchive({ gz, manifest, id }) {
@@ -402,7 +402,7 @@ function apply(ctx, config) {
   }
 
   /**
-   * 上传一份归档到 GitHub 私有仓库（contents API，**索引最后写**）。
+   * 上传一份归档到 GitHub 私有仓库（contents API，内容对象写完后**索引最后写**；索引写成功后才删旧快照）。
    * 与 WebDAV 通道使用**同一份载荷**，故 id 由调用方传入以保持两通道一致。
    */
   async function uploadGitHubArchive({ gz, manifest, id, tokenInfo }) {
