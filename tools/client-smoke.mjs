@@ -500,7 +500,7 @@ const renderSerial = (language, seeds, bust) => serialize(() => render(language,
 /**
  * useState 种子必须与组件内**声明顺序**严格对齐，否则整棵树的分支会跑偏。
  * SyncBackupSection 的顺序：view, note, tone, busy, ready, tab, op, sizes, sizesState,
- * check, copyNote, recovery, recoveryNote, alive
+ * check, copyNote, recovery, recoveryNote, recoveryPending, recoveryExpiresAt, alive
  *
  * ⚠️ v3 新增了 recovery / recoveryNote 两个 state，两者之间务必同步：
  * 少给一个种子，后面的一切都会往前挪一位。曾经就因为少了它们，recovery 拿到了本该属于
@@ -522,6 +522,8 @@ function seedsFor(over = {}) {
     over.copyNote ?? "",
     over.recovery ?? "",
     over.recoveryNote ?? "",
+    over.recoveryPending ?? false,
+    over.recoveryExpiresAt ?? 0,
     { current: true },
   ];
 }
@@ -870,6 +872,35 @@ check("环境页：v.busy=true 时体积统计与恢复自检都禁用", async (
   assert.ok(recalc && verify, "env maintenance buttons missing");
   assert.equal(recalc.props.disabled, true, "recalc must be disabled while busy");
   assert.equal(verify.props.disabled, true, "restore-check must be disabled while busy");
+});
+/* —— 9.7 报告 5.5/3.4：恢复码的确认门与明文显示分支 —— */
+check("概览默认态：显示「导出恢复码」按钮，且不出现确认对话框", async () => {
+  const r = await renderSerial("zh-CN", seedsFor(), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("导出恢复码"), "export button missing");
+  assert.equal(r.nodes.filter((n) => n.props?.role === "alertdialog").length, 0, "confirm dialog must not pre-render");
+});
+check("点导出先进确认门：pending=true 时渲染 alertdialog，含确认与取消", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({ recoveryPending: true }), nextBust());
+  const dlg = r.nodes.filter((n) => n.props?.role === "alertdialog");
+  assert.equal(dlg.length, 1, `alertdialog count=${dlg.length}`);
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("确认导出"), "confirm CTA missing");
+  assert.ok(joined.includes("60 秒"), "TTL must be stated before revealing plaintext");
+  assert.ok(!joined.includes("恢复码（只显示这一次）"), "plaintext must NOT render before it was fetched");
+});
+check("拿到明文才进「只显示这一次」分支", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({ recovery: "AAAA-BBBB-CCCC-DDDD" }), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("只显示这一次"), "shown-once label missing");
+  assert.ok(joined.includes("AAAA-BBBB-CCCC-DDDD"), "plaintext code missing");
+});
+check("英文确认门不含 CJK", async () => {
+  const r = await renderSerial("en-US", seedsFor({ recoveryPending: true }), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("Confirm export"), "en confirm CTA missing");
+  const cjk = joined.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g);
+  assert.equal(cjk, null, `CJK leaked: ${JSON.stringify(cjk)}`);
 });
 section("结果");
 if (failures.length > 0) {

@@ -78,3 +78,5 @@ back a string, and passing it through makes Save look inert.
 | `lib/webdav.js` / `lib/github.js` | 保留策略是**先写新索引、再 best-effort 删除**。反过来一旦索引写失败就会留下指向已删对象的悬空索引。 | 两通道的「先写索引再删除」用例 |
 | `index.js` | 所有运行入口（agent 工具 / GUI RPC / 定时器）统一经 `runExclusive()` 拿单次运行锁；`busy` 是可判定形状而不是静默失败。 | `channels-smoke` 的并发互斥用例 |
 | `index.js` | 恢复自检用的 manifest 在**裁剪之后**重建（否则关掉 sessions 会稳定误报缺失）；自检失败置 `restoreCheckFailed` 并让该次运行判为未通过。 | `crypto-smoke` / `channels-smoke` |
+| `index.js` (RPC) | `sync-backup.prune` / `sync-backup.restore-check` 整体走 `withRunLock`：备份打包期间**不允许**删产物或读半成品归档；`prune` 的状态快照在锁**外**取（锁内取会把这次 prune 自己标成 busy 回传）。`catalog-sizes` 刻意不持锁（只读源目录，持锁会让 GB 级扫描卡住备份排期）。 | `channels-smoke` [15]（hold 住 PUT 让锁被真实持有） |
+| `lib/client.js` (recovery) | 恢复码明文要过**二次确认门**才向 host 请求（报告 3.4），显示后 60 秒（`RECOVERY_TTL_MS`）自动抹掉，离开概览页即清空；明文只活在 React state，绝不落 localStorage/日志。host 侧的授权边界是已认证的注入上下文 RPC 通道本身——本插件不伪造「host 校验用户手势」的能力。 | `client-smoke` 9.7 组 |

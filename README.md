@@ -17,8 +17,9 @@ copies. Local packing is always available; both upload channels are off until yo
 | Stop making me edit YAML | Changes made in the settings panel are written to `$DSH_HOME/dsh-sync-backup/config.json`, which **overrides** the patch file. Delete that file to fall back to defaults. |
 
 The recovery code is **not** a second factor — it is the key itself, base32-encoded. Whoever holds it
-holds every archive ever written. The panel shows it masked and reveals the plaintext only when you
-click export.
+holds every archive ever written. The panel shows it masked; the plaintext only appears after an
+explicit confirm, then auto-hides after 60 seconds or as soon as you leave the tab (it lives in
+React state only — never localStorage, never a log).
 
 Two other safety properties worth knowing before you install:
 
