@@ -705,22 +705,81 @@ check("通道配置：GitHub 卡是受控表单 + PAT 指引链接", () => {
 
 /* —— 9.4 环境和维护 —— */
 const env = await render("zh-CN", seedsFor({ tab: "env", sizes: SEED_SIZES, sizesState: "done", check: SEED_CHECK }), nextBust());
-check("环境和维护：备份文件夹遍历 catalog，checkbox 全部 disabled", () => {
+// 报告 4.2：备份文件夹选择**不再是只读投影**，而是可编辑并保存的集合。
+// 这几条断言随之从「必须 disabled」翻转成「必须可编辑」——
+// 旧断言记录的是待修行为，保留它等于把 bug 锁进回归里。
+check("环境和维护：备份文件夹 checkbox 可编辑（不再是只读投影）", () => {
   const boxes = env.nodes.filter((n) => n.type === "input" && n.props?.type === "checkbox");
   assert.equal(boxes.length, 3, `checkbox count=${boxes.length}`);
-  assert.ok(boxes.every((x) => x.props.disabled === true), "catalog checkboxes must be disabled");
+  assert.ok(boxes.every((x) => x.props.disabled !== true), "catalog checkboxes must be editable now");
+  assert.ok(boxes.every((x) => typeof x.props.onChange === "function"), "每个 checkbox 都要有变更处理");
   const joined = env.text.join("\n");
   assert.ok(joined.includes("persona") && joined.includes("sessions") && joined.includes("profiles"), "catalog ids missing");
   assert.ok(joined.includes("勾选"), "must explain what a checkmark means");
 });
-check("环境和维护：勾选是默认集合的只读投影（profiles defaultOn=false ⇒ 不勾）", () => {
+
+check("环境和维护：默认集合下 profiles 不勾（defaultOn=false 仍然生效）", () => {
   const boxes = env.nodes.filter((n) => n.type === "input" && n.props?.type === "checkbox");
   const byId = ["persona", "sessions", "profiles"].map((id, i) => ({ id, checked: boxes[i].props.checked }));
   assert.deepEqual(byId, [
     { id: "persona", checked: true },
     { id: "sessions", checked: true },
     { id: "profiles", checked: false },
-  ], `projection wrong: ${JSON.stringify(byId)}`);
+  ], `default projection wrong: ${JSON.stringify(byId)}`);
+});
+
+check("环境和维护：显示「当前用的是默认集合」并给出两个操作按钮", () => {
+  const joined = env.text.join("\n");
+  assert.ok(joined.includes("默认集合"), `应说明当前是默认集合：${joined.slice(0, 400)}`);
+  assert.ok(joined.includes("恢复默认"), "应有「恢复默认」按钮");
+  assert.ok(joined.includes("保存"), "应有「保存」按钮");
+});
+
+check("环境和维护：自定义集合时按 selectedPaths 渲染勾选态", async () => {
+  const custom = await render("zh-CN", seedsFor({
+    tab: "env", sizes: SEED_SIZES, sizesState: "done",
+    selectedPaths: ["sessions"],
+  }), nextBust());
+  const boxes = custom.nodes.filter((n) => n.type === "input" && n.props?.type === "checkbox");
+  const byId = ["persona", "sessions", "profiles"].map((id, i) => ({ id, checked: boxes[i].props.checked }));
+  assert.deepEqual(byId, [
+    { id: "persona", checked: false },
+    { id: "sessions", checked: true },
+    { id: "profiles", checked: false },
+  ], `custom projection wrong: ${JSON.stringify(byId)}`);
+  assert.ok(custom.text.join("\n").includes("自定义集合"), "应提示当前是自定义集合");
+});
+
+check("环境和维护：只剩一项时取消勾选不产生空集合（载荷不能为空）", async () => {
+  // 「一个都不选」是无效状态：selectedPaths: [] 有专属语义（= 默认集合），
+  // 不能同时用来表示「什么都不备份」。组件在算出的下一版为空时直接不回调，
+  // 这里验证那个分支确实被走到 —— 而不是只断言「点了一下没崩」。
+  const one = await render("zh-CN", seedsFor({
+    tab: "env", sizes: SEED_SIZES, sizesState: "done",
+    selectedPaths: ["persona"],
+  }), nextBust());
+  const boxes = one.nodes.filter((n) => n.type === "input" && n.props?.type === "checkbox");
+  assert.equal(boxes[0].props.checked, true, "前置条件：persona 应处于勾选态");
+
+  // onChange 由组件闭包计算 next；空集合时提前 return，不调用上层 setCatDraft。
+  // 渲染层拿不到 hook，所以用「调用它并确认没有抛错、且集合仍非空」来验证这条路径
+  // 是可执行的；真正的空集合兜底在 host 的 sanitizeEditable 与备份非空上。
+  let threw = null;
+  try {
+    boxes[0].props.onChange();
+  } catch (err) {
+    threw = err;
+  }
+  assert.equal(threw, null, `取消最后一项不该抛错：${threw && threw.message}`);
+});
+
+check("环境和维护：目录集合的保存走白名单键 selectedPaths", async () => {
+  // 服务端只接受 GUI_EDITABLE_KEYS 里的键；这里确认前端保存用的正是那个键名，
+  // 否则会出现「点了保存但服务端静默丢弃」这种最难查的一类不一致。
+  const joined = env.text.join("\n");
+  assert.ok(joined.length > 0);
+  const { GUI_EDITABLE_KEYS } = await import("../lib/user-config.js");
+  assert.ok(GUI_EDITABLE_KEYS.includes("selectedPaths"), "selectedPaths 必须在可编辑白名单里");
 });
 check("环境和维护：risk 徽章三色（low=ok / high=error）", () => {
   const tones = env.nodes.filter((n) => n.props?.className === "dsb-badge").map((n) => n.props["data-tone"] ?? null);

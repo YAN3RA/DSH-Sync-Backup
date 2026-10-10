@@ -1,0 +1,70 @@
+name: CI
+
+# 报告 7.2：本仓库此前没有任何 CI。离线测试全都能在无网、无凭据的情况下跑完
+# （smoke / security / client / crypto / webdav / github / scheduler / channels / dry-run），
+# 所以矩阵可以直接跑在干净的 runner 上。
+#
+# 明确**不**在这里跑的东西：
+#   - tools/host-gates.mjs：需要 Electron-as-Node 与真实 DSH 运行时，
+#     属发布前的手动检查，不是每个 PR 都能满足的前提。
+#   - 任何真实通道写入：需要 WebDAV 凭据或 GitHub PAT。
+#     Live integration 只在隔离的临时私有仓库/目录里做，且不暴露 token。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # —— 离线回归：Linux + Windows × Node 20/22 ——
+  # 两套 OS 都要跑，是因为路径处理、文件 rename、符号链接权限在两边的行为不同
+  # （本机开发时就踩到过：Windows 非管理员建不了文件符号链接，但 junction 可以）。
+  test:
+    name: test (node ${{ matrix.node }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # 本插件零第三方运行时依赖（只用 node: 内置），因此无需 install 步骤。
+      - name: Unit + smoke + security regression
+        run: npm test
+      - name: Full dry-run (packs for real, zero network)
+        run: npm run dry-run:full
+      - name: Scheduler plan
+        run: npm run scheduler-plan
+
+  # —— 安全回归单独可见 ——
+  # 与 test 重复运行是有意的：它是「不可信输入不产生越界后果」这条保证的
+  # 专属信号，绿/红应当在 PR 上单独看到，而不是埋在 npm test 的长输出里。
+  security:
+    name: security regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Malicious archive / symlink / key / index fixtures
+        run: npm run security-smoke
+
+  # —— 前端契约（静态，不需要浏览器） ——
+  client-contract:
+    name: client contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: i18n + component + token contract
+        run: npm run client-contract
+      - name: Client smoke
+        run: npm run client-smoke

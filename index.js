@@ -31,7 +31,7 @@ import { collect, isForbidden, resolveWhitelist, CATALOG } from "./lib/collect.j
 import { buildArchive, openArchive } from "./lib/archive.js";
 import { restoreCheck, cleanupTempDir } from "./lib/restore-check.js";
 import { persist, prune, usage as artifactUsage, listArtifacts, artifactDir } from "./lib/artifacts.js";
-import { loadOrCreateKey } from "./lib/keyring.js";
+import { loadOrCreateKey, keyStatus } from "./lib/keyring.js";
 import { encryptBytes, maskRecoveryCode } from "./lib/crypto.js";
 import { loadState, saveState, redact } from "./lib/state.js";
 import { loadUserConfig, saveUserConfig, mergeConfig, pickEditable, sanitizeEditable } from "./lib/user-config.js";
@@ -884,12 +884,39 @@ function apply(ctx, config) {
     const userConfig = await loadUserConfig(dataDir).catch(() => ({}));
     const userOverrides = new Set(Object.keys(userConfig).filter((k) => k in BASELINE));
     const userOverrideCount = userOverrides.size;
-    let recovery = { recoveryCode: "", created: false };
-    try {
-      recovery = await loadOrCreateKey(dataDir);
-    } catch {
-      /* 拿不到密钥时不让状态页挂掉 —— 面板会把加密字段显示为未知 */
+
+    // ⚠️ 状态快照**必须只读**。
+    // 以前这里调的是 loadOrCreateKey —— 于是「打开设置页看一眼」这个纯读操作，
+    // 在密钥尚不存在时会顺手生成一把并写盘。那既是意外的写副作用，也让
+    // 「第一次备份时才生成密钥」这条设计变得不成立。改走 keyStatus：
+    // 只报告存在/缺失/损坏，绝不创建、绝不改写。
+    const kst = await keyStatus(dataDir).catch(() => ({ status: "unreadable" }));
+    const keyState = {
+      status: kst.status, // ok | missing | invalid | unreadable
+      detail: kst.detail ?? null,
+      fingerprint: kst.fingerprint ?? null,
+      // 兼容旧字段名：面板此前读 recovery.created 判断「密钥是否已存在」
+      created: kst.status === "ok",
+    };
+    let recovery = { recoveryCode: "", created: kst.status === "ok" };
+    if (kst.status === "ok") {
+      // 只有密钥确实可用时才去读它——读失败（比如恰好被删）也不影响状态页
+      try {
+        recovery = await loadOrCreateKey(dataDir);
+      } catch {
+        recovery = { recoveryCode: "", created: false };
+      }
     }
+
+    // 数据去向：解析后的最终目标（含 config-manager 回退）与凭据是否就绪。
+    // 这两个查询都是只读的，失败一律降级为「未知」而不是让状态页挂掉。
+    const webdavTarget = await resolveWebdavTarget(home, {
+      url: config.webdavUrl,
+      username: config.webdavUsername,
+    }).catch(() => undefined);
+    // 注意：webdavPassword() 找不到口令时返回 undefined 而**不抛错**，
+    // 所以这里必须看返回值，不能只看有没有 reject。
+    const webdavCredentialConfigured = (await webdavPassword().catch(() => undefined)) !== undefined;
 
     const lines = [
       `插件: ${st.pluginLoaded ? "已加载" : "未运行过"}`,
@@ -1009,6 +1036,46 @@ function apply(ctx, config) {
       },
       webdavUrl: config.webdavUrl,
       webdavUsername: config.webdavUsername,
+      // ---- 数据去向（报告 5.2 / 10.3）：显示**解析后**的最终目标与来源 ----
+      //
+      // 为什么必须由服务端给出：WebDAV 的 url/username 留空时会回退读
+      // config-manager 的 sync-config.json。界面若只回显本插件自己的两个字段，
+      // 用户看到的是两个空框 —— 而备份其实正在发往另一处配置里写的服务器。
+      // 这正是「数据发到哪里」最不能含糊的地方。
+      destination: {
+        // 口令只报「配没配」，绝不回显
+        webdav: {
+          enabled: config.webdavEnabled,
+          resolvedUrl: webdavTarget ? webdavTarget.url : null,
+          resolvedUsername: webdavTarget ? webdavTarget.username : null,
+          // 来源：plugin-config=本插件自己填的；config-manager=继承的；none=没找到
+          source: webdavTarget ? webdavTarget.source : "none",
+          sourceLabel:
+            webdavTarget?.source === "plugin-config"
+              ? "本插件配置"
+              : webdavTarget?.source === "config-manager"
+                ? "继承 config-manager"
+                : "未配置",
+          // 明文传输警告：HTTP 会把 Basic 口令发成明文
+          plaintext: webdavTarget ? String(webdavTarget.url).startsWith("http:") : false,
+          credentialConfigured: webdavCredentialConfigured,
+          path: config.webdavPath,
+        },
+        github: {
+          enabled: config.githubEnabled,
+          repo: config.githubRepo || "",
+          source: config.githubRepo ? "plugin-config" : "none",
+          sourceLabel: config.githubRepo ? "本插件配置" : "未配置",
+          plaintext: false, // GitHub 只走 HTTPS API
+          path: config.githubPath,
+        },
+        // 是否真的会外传：任一通道开着且目标可用
+        willTransmit:
+          (config.webdavEnabled && webdavTarget !== undefined) ||
+          (config.githubEnabled && Boolean(config.githubRepo)),
+        // 总闸门：dryRun 为真时即使通道开着也不出网
+        gatedByDryRun: config.dryRun === true,
+      },
       dataDir,
       statePath: path.join(dataDir, "state.json"),
       // ---- v3：小白化所需的状态 ----

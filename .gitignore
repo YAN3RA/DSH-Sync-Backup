@@ -45,6 +45,7 @@ _research/
 _probe-*.mjs
 .tmp-*.mjs
 *.local.md
+_commitmsg.tmp
 
 # Also exempt from mirroring: the Local package cache npm refreshes routinely
 package-lock.json.bak

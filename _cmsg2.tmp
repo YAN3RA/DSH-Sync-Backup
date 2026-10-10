@@ -1,0 +1,14 @@
+feat: editable folder set, channel-switch confirm, CI, docs (review phase 3)
+
+- client: 备份文件夹选择从只读投影改为可编辑(草稿+保存+恢复默认);
+  [] 的「默认集合」语义做成显式状态, 空选不可达; 只读断言翻转为可编辑契约
+- client: 通道开关仅在 false->true 时二次确认(关通道是收紧, 不该被拦)
+- index: 状态快照改用只读 keyStatus, 打开设置页不再创建密钥;
+  view.destination 暴露解析后的最终目标与来源(含 config-manager 回退)与明文警告
+- 新增 .github/workflows/ci.yml: Linux/Windows x Node 20/22 跑 test + dry-run:full
+  + scheduler-plan, 独立的安全回归与前端契约作业; host-gates 与真实通道明确不进 CI
+- README 从 ~50KB 精简到 ~10KB: Architecture/Local verification 外移 docs/,
+  首页补「只校验不恢复」与密钥同目录的真实限制说明
+- collect/patch 文案修正(profiles 不含 node_modules; 自检是内存解包校验)
+
+测试: client-smoke 58->62

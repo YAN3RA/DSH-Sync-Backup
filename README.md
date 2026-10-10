@@ -143,91 +143,41 @@ either is a write-class action — confirm before doing it.
 
 ## Architecture
 
-```
-index.js          Host half: Config + apply, 2 tools, prompt section, scheduler, settings RPC channel
-cordis.patch.yml  bundle patch row (row id must byte-match `export const name`)
-lib/client.js     Client half: the settings panel (source-as-product, no build)
-lib/collect.js    allowlist collection + structural forbidden-path assertions
-lib/archive.js    hand-written USTAR writer + gzip (zero dependencies)
-lib/crypto.js     AES-256-GCM envelope; lib/keyring.js owns the key and recovery code
-lib/webdav.js     WebDAV client; lib/github.js GitHub contents API client
-lib/artifacts.js  local artifact listing + pruning; lib/restore-check.js pre-restore verification
-lib/scheduler.js  self-rescheduling timers with exponential backoff
-lib/user-config.js  config.json allowlist + per-key validation
-tools/            verification suites and the two credential helpers
-```
+`lib/client.js` adds a **Backup & Sync** section to Settings, backed by the official Connection RPC
+(no custom `/api` routes, no bundler; the client bundle only ever does `require("react")`). The Host
+half exports two tools — `sync_backup_run` and `sync_backup_status`.
 
-| Design decision | Reason |
-| --- | --- |
-| Hand-written USTAR instead of the `tar` package | 45 of 259 paths exceed the 100-byte USTAR `name` field, up to 158 bytes; they need `name` + `prefix` splitting. Zero dependencies also keeps the observable attack surface small. |
-| `peerDependencies` declared but no `dependencies` | Required by the loader for `link:` installs (see Install). Nothing is installed from them. |
-| The panel asks for confirmation before saving `webdavUrl` / `webdavUsername` / `githubRepo` | Those three change *where data goes*; everything else is a quantity or a schedule. Friction belongs where a misclick becomes an exfiltration. |
-
-### Settings panel
-
-`lib/client.js` adds a **Backup & Sync** section, registered through
-`ctx.slots.inject("settings.section", …)` with `id: "sync-backup"` and `inject: () => ({ rpcCall })`.
-Transport is the official Connection RPC — no custom `/api` routes, no bundler, and the bundle only
-ever does `require("react")`.
-
-| Tab | Contents |
-| --- | --- |
-| Overview | health bar · run state · payload · **周期与保留 (editable)** · recovery code |
-| Artifacts | local encrypted archives, remote copies per channel, prune action |
-| Channels | controlled form: WebDAV enable/url/user/path, GitHub enable/repo/path |
-| Environment | per-folder inventory with local sizes and risk badges · restore check |
-
-Edit mode reads values straight from the host's `view` rather than a snapshot taken at mount, and only
-the keys that actually changed are sent. Numeric inputs convert with `Number()` — the DOM always hands
-back a string, and passing it through makes Save look inert.
-
-### Tools (Host half)
-
-| Tool | Behaviour |
-| --- | --- |
-| `sync_backup_run` | Defaults to dry-run: pack + verify, no network. `upload: true` uploads and verifies by reading back the SHA256; refused while `dryRun: true`. |
-| `sync_backup_status` | Loaded state, last result, per-channel id/SHA256/retained count, effective settings, next planned run. |
-
-> **Why tool outputs are built by omitting keys.** Host validates every tool return value twice, and the
-> two gates disagree about absent data: `snapshotJsonValue` rejects `undefined` anywhere
-> (`value is not lossless JSON`), while the declared schema rejects a `null` where an `object` or
-> `string` is expected. **The only legal encoding of "no value" is an absent key.** This cost one
-> real-Host failure that every offline suite had passed.
+📖 **[docs/architecture.md](docs/architecture.md)** — module map, design decisions, the settings panel,
+the tool contract, and the invariants that must not regress (key handling, archive parsing, index
+trust, run locking).
 
 ---
 
 ## Local verification
 
 ```sh
-npm test              # everything below, in sequence
+npm test              # all offline suites + full dry-run
 npm run dry-run:full  # full pack + per-file SHA256 comparison on extraction
+npm run security-smoke # malicious archive / symlink / key / index fixtures
 ```
 
-| Suite | Covers |
-| --- | --- |
-| `smoke` | Host half: manifest contract, RPC dispatch, tool output gates, temp DSH_HOME |
-| `client-smoke` / `client-contract` | Client half: module loader, slot registration, four tabs, i18n keys, endpoint allowlist, no password field |
-| `crypto-smoke` | Encryption round-trip, IV uniqueness, wrong-key rejection, cross-machine recovery-code restore |
-| `webdav-smoke` / `github-smoke` | Both clients against injected fake requests — **zero network** |
-| `scheduler-smoke` / `channels-smoke` | Fake clock and timers; two-channel orchestration on local fake servers |
-
-`smoke` uses `--import ./tools/_hooks-register.mjs` to redirect the two harness packages to minimal
-stubs, so the Host half is testable without booting DSH. `host-gates` is deliberately **not** part of
-`npm test` — it needs the Electron binary to read `app.asar` and is the only suite that drives the real
-Host output gates:
-
-```sh
-$env:ELECTRON_RUN_AS_NODE = "1"
-& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\DeepSeek Harness.exe" --expose-internals (Resolve-Path tools\host-gates.mjs).Path
-```
+📖 **[docs/testing.md](docs/testing.md)** — what each suite covers, how to run `host-gates` with the
+Electron binary, what CI runs, and what is deliberately left out of it.
 
 ---
 
 ## Known limitations
 
-- No cloud-side retention pruning yet beyond `keepLast`; old remote snapshots must be removed manually.
-- `restore-check` proves an archive *can* be restored; there is no one-click restore.
-- The GitHub channel is exercised only against fake transports — no live upload has been performed.
+- **`restore-check` verifies; it does not restore.** The plugin proves an archive *can* be decrypted,
+  unpacked and matched against its manifest, but there is **no write-back to `$DSH_HOME`** and no
+  one-click recovery. Verification success is **not** the same as "disaster recovery is done". Manual
+  recovery is: put the recovery code back, decrypt the archive, and unpack it yourself.
+- Remote retention is driven by `keepLast` per channel; there is no age-based remote pruning.
+- The GitHub channel is exercised only against fake transports in tests — no live upload to a real
+  repository has been performed yet.
+- The encryption key lives next to the archives (`$DSH_HOME/dsh-sync-backup/key.b64`, base64 not
+  re-encrypted). Copying that whole directory takes the key and the archives together; encryption
+  protects archives *after they leave the machine*, not against someone with read access to this one.
 
 ## License
 
