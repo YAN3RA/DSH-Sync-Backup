@@ -412,6 +412,66 @@ await checkAsync("WebDavClient 构造时套用传输判定", async () => {
 });
 
 /* ============================================================
+ * 3.2 HTTP 响应体上限
+ * ============================================================ */
+
+section("3.2 HTTP 响应体上限");
+
+await checkAsync("WebDAV：响应体超上限即销毁请求，不 concat 进内存", async () => {
+  const { requestOnce } = await import("../lib/webdav.js");
+  const http = await import("node:http");
+  // 起一个会吐超量数据的本地服务（本机 http 允许，且这正是要测的路径）
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/octet-stream" });
+    const chunk = Buffer.alloc(64 * 1024, 1);
+    let sent = 0;
+    const push = () => {
+      if (sent > 2 * 1024 * 1024) { res.end(); return; }
+      sent += chunk.length;
+      if (res.write(chunk)) setImmediate(push);
+      else res.once("drain", push);
+    };
+    push();
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    await assert.rejects(
+      () => requestOnce("GET", `http://127.0.0.1:${port}/`, { maxResponseBytes: 256 * 1024 }),
+      (err) => /超过上限|ResponseTooLarge/.test(String(err?.message ?? err)),
+      "超限必须抛错，而不是把整个响应读进内存",
+    );
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+await checkAsync("WebDAV：未超限的响应正常返回", async () => {
+  const { requestOnce } = await import("../lib/webdav.js");
+  const http = await import("node:http");
+  const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end("small body");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  try {
+    const res = await requestOnce("GET", `http://127.0.0.1:${port}/`, { maxResponseBytes: 1024 });
+    assert.equal(res.status, 200);
+    assert.equal(res.buffer.toString("utf8"), "small body");
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+await checkAsync("两通道都导出了默认响应上限常量", async () => {
+  const wd = await import("../lib/webdav.js");
+  const gh = await import("../lib/github.js");
+  assert.ok(wd.DEFAULT_MAX_RESPONSE_BYTES > 0, "webdav 应导出上限");
+  assert.ok(gh.DEFAULT_MAX_RESPONSE_BYTES > 0, "github 应导出上限");
+});
+
+/* ============================================================
  * 收尾
  * ============================================================ */
 

@@ -270,9 +270,14 @@ function apply(ctx, config) {
     }
     return config;
   }
-  // 立即触发一次（不等到 runOnce）：apply 里注册的定时器初次启动就该用用户值。
-  // 这是个 floating promise —— 失败已在 reloadEffective 里吞掉，不会 unhandled。
-  void reloadEffective();
+  // 立即触发一次，并**把 promise 留下来**。
+  //
+  // 报告 4.3：以前这里是个 floating promise，而调度器稍后并发 start()。
+  // 文件读得快时看不出问题；慢盘或启动顺序变化下，scheduler 可能先拿到 patch
+  // 初值算出排期，随后才读到用户配置 —— 表现为「明明设了 6 小时，第一次却按 12
+  // 小时排」。持有 promise 让启动路径可以等它，顺序就不再靠运气。
+  // 失败已在 reloadEffective 里吞掉，不会 unhandled。
+  const effectiveReady = reloadEffective();
 
   /**
    * 解析 WebDAV 口令 —— **只读本插件自己的槽位**（需求③）。
@@ -821,17 +826,22 @@ function apply(ctx, config) {
   // 在服务已就绪时会**同步**回调，而状态快照要读 `scheduler.nextRunAt`；若此时 `scheduler`
   // 仍处于 TDZ，回调会抛 ReferenceError。
   const scheduler = new BackupScheduler({
-    getConfig: async () => ({
-      enabled: config.enabled,
-      intervalHours: config.intervalHours,
-      remoteIntervalHours: config.remoteIntervalHours,
-      startupMinIntervalMs: config.startupMinIntervalMs,
-      maxBackoffHours: config.maxBackoffHours,
-      dryRun: config.dryRun,
-      schedulerEnabled: config.schedulerEnabled,
-      uploadOnSchedule: config.uploadOnSchedule,
-      startupRunOnBoot: config.startupRunOnBoot,
-    }),
+    getConfig: async () => {
+      // 排期前先确保用户配置已合并进来，否则会按 patch 初值算下一次运行时间。
+      // 这一句是幂等的（读不到就用默认值），重复 await 没有额外代价。
+      await effectiveReady.catch(() => {});
+      return {
+        enabled: config.enabled,
+        intervalHours: config.intervalHours,
+        remoteIntervalHours: config.remoteIntervalHours,
+        startupMinIntervalMs: config.startupMinIntervalMs,
+        maxBackoffHours: config.maxBackoffHours,
+        dryRun: config.dryRun,
+        schedulerEnabled: config.schedulerEnabled,
+        uploadOnSchedule: config.uploadOnSchedule,
+        startupRunOnBoot: config.startupRunOnBoot,
+      };
+    },
     getState: async () => await loadState(dataDir),
     // 走 runExclusive：定时触发与手动触发共享同一把锁
     runOnce: async (o) => await runExclusive(o),
