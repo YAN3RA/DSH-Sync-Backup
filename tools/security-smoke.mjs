@@ -24,6 +24,7 @@ import { buildArchive, openArchive, parseTar, checkArchivePath, resolveInside, B
 import { restoreCheck, cleanupTempDir } from "../lib/restore-check.js";
 import { listWhitelistFiles, readEntries } from "../lib/collect.js";
 import { normalizeWebDavPath, joinUrl } from "../lib/webdav.js";
+import { isLoopbackHost, checkTransportUrl } from "../lib/transport-guard.js";
 
 let passed = 0;
 let failed = 0;
@@ -335,6 +336,79 @@ await checkAsync("joinUrl 逐段编码，不把用户输入直接拼进 URL", as
   assert.ok(!u.includes("备份"), `不应出现未编码中文: ${u}`);
   assert.ok(u.includes(encodeURIComponent("备份 目录")));
   assert.equal(joinUrl("https://dav.example.com/dav", ""), "https://dav.example.com/dav/");
+});
+
+/* ============================================================
+ * 3.1 传输安全：凭据不得经明文 HTTP 发给非本机
+ * ============================================================ */
+
+section("3.1 传输安全判定");
+
+await checkAsync("非本机 http 被拒（凭据会明文外发）", async () => {
+  for (const url of [
+    "http://webdav.example.com/dav/",
+    "http://192.168.1.10/dav/",
+    "http://api.github.example.com/",
+  ]) {
+    const r = checkTransportUrl(url, { what: "目标" });
+    assert.equal(r.ok, false, `应拒绝 ${url}`);
+    assert.ok(/明文/.test(r.problem), "错误信息要点明明文风险");
+  }
+});
+
+await checkAsync("https 一律放行", async () => {
+  for (const url of ["https://dav.jianguoyun.com/dav/", "https://api.github.com", "https://ghe.corp.example/api/v3"]) {
+    assert.equal(checkTransportUrl(url).ok, true, `应放行 ${url}`);
+  }
+});
+
+await checkAsync("本机 http 放行（本地假服务/私服的常规用法）", async () => {
+  for (const url of ["http://127.0.0.1:8080/dav/", "http://localhost/dav/", "http://127.5.5.5/x", "http://[::1]:9/x"]) {
+    const r = checkTransportUrl(url);
+    assert.equal(r.ok, true, `应放行 ${url}`);
+    assert.equal(r.loopback, true);
+  }
+});
+
+await checkAsync("显式 allowInsecure 才放行非本机 http（须用户主动开启）", async () => {
+  const url = "http://dav.internal.example/dav/";
+  assert.equal(checkTransportUrl(url).ok, false, "默认必须拒绝");
+  assert.equal(checkTransportUrl(url, { allowInsecure: true }).ok, true, "显式确认后才放行");
+});
+
+await checkAsync("非 http(s) 协议被拒", async () => {
+  for (const url of ["ftp://x/y", "file:///etc/passwd", "gopher://x"]) {
+    assert.equal(checkTransportUrl(url).ok, false, `应拒绝 ${url}`);
+  }
+  assert.equal(checkTransportUrl("not a url").ok, false);
+});
+
+await checkAsync("isLoopbackHost 不把「看似本机」的外网名当本机", async () => {
+  assert.equal(isLoopbackHost("127.0.0.1"), true);
+  assert.equal(isLoopbackHost("localhost"), true);
+  // 这些都不该被误判为本机
+  for (const h of ["localhost.evil.com", "127.0.0.1.evil.com", "0.0.0.0", "10.0.0.1", "example.com", "127.0.0.256"]) {
+    assert.equal(isLoopbackHost(h), false, `${h} 不该被判为本机`);
+  }
+});
+
+await checkAsync("WebDavClient 构造时套用传输判定", async () => {
+  const { WebDavClient } = await import("../lib/webdav.js");
+  // 非本机 http 必须构造失败
+  assert.throws(
+    () => new WebDavClient({ baseUrl: "http://dav.example.com/dav/", username: "u", getPassword: async () => "p" }),
+    /明文|https/,
+  );
+  // 本机 http 与外部 https 可构造
+  new WebDavClient({ baseUrl: "http://127.0.0.1:9/dav/", username: "u", getPassword: async () => "p" });
+  new WebDavClient({ baseUrl: "https://dav.example.com/dav/", username: "u", getPassword: async () => "p" });
+  // 显式放行
+  new WebDavClient({
+    baseUrl: "http://dav.internal.example/dav/",
+    username: "u",
+    getPassword: async () => "p",
+    allowInsecureHttp: true,
+  });
 });
 
 /* ============================================================

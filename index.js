@@ -118,6 +118,15 @@ const Config = z.object({
   /** WebDAV 目标目录（相对 DAV 根）。 */
   webdavPath: z.string().default("dsh-backup/"),
   /**
+   * 是否允许对**非本机**目标使用明文 HTTP。
+   *
+   * 默认 false：Basic 口令在 http: 下是明文，发到外网等于交出凭据。
+   * WebDAV 客户端本来就只对 loopback 放行 http；这一项是为「自建内网私服
+   * 且用户明确接受风险」留一个显式出口 —— 它必须由用户主动打开，
+   * 且界面会持续提示。别把它当成省事的开关。
+   */
+  webdavAllowInsecureHttp: z.boolean().default(false),
+  /**
    * 是否启用 WebDAV 通道。
    * **v3 起默认 false** —— 装上就用、默认零外传；用户明确要去「通道配置」页
    * 打开开关并填目标，才第一次连外网。
@@ -148,6 +157,8 @@ const Config = z.object({
   githubBranch: z.string().default(""),
   /** GitHub 单次 HTTP 请求超时（毫秒）。15 MB 载荷 base64 后约 21 MB 上行。 */
   githubTimeoutMs: z.number().default(300000),
+  /** 同 webdavAllowInsecureHttp：默认 false，仅本机 http 自动放行。 */
+  githubAllowInsecureHttp: z.boolean().default(false),
   /** 状态文件与本地暂存目录（相对 $DSH_HOME）。 */
   dataDir: z.string().default("dsh-sync-backup"),
   /** 注册提示词小节（说明本插件能力与边界）。 */
@@ -312,6 +323,8 @@ function apply(ctx, config) {
       username: target.username,
       getPassword: async () => pwdInfo.value,
       timeoutMs: config.webdavTimeoutMs,
+      // 显式配置才放行「非本机 + http」；否则只允许 https 或本机
+      allowInsecureHttp: config.webdavAllowInsecureHttp === true,
     });
 
     const now = new Date();
@@ -394,6 +407,7 @@ function apply(ctx, config) {
       apiBaseUrl: config.githubApiBaseUrl || undefined,
       getToken: async () => tokenInfo.value,
       timeoutMs: config.githubTimeoutMs,
+      allowInsecureHttp: config.githubAllowInsecureHttp === true,
     });
 
     const archiveSha256 = createHash("sha256").update(gz).digest("hex");
