@@ -848,6 +848,29 @@ check("英文环境页也不含 CJK（catalog 体积文案随语言走）", () =
   assert.ok(joined.includes("15 files / 33.38 MB on this machine"), `en size line missing: ${joined.slice(0, 900)}`);
 });
 
+/* —— 9.6 报告 5.3：维护按钮必须统一查 busy（备份进行中禁掉清理/体积/自检） —— */
+check("产物页：v.busy=true 时「立即清理」禁用（与 op 并行生效）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({ tab: "artifacts", view: { ...SEED_VIEW, busy: true } }), nextBust());
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("立即清理"));
+  assert.ok(btn, "prune button missing");
+  assert.equal(btn.props.disabled, true, "prune must be disabled while a backup is running");
+});
+check("产物页：busy=false 且空闲时「立即清理」可点（回归反向位）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({ tab: "artifacts" }), nextBust());
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("立即清理"));
+  assert.ok(btn);
+  assert.notEqual(btn.props.disabled, true, "prune must stay clickable when idle");
+});
+check("环境页：v.busy=true 时体积统计与恢复自检都禁用", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "env", view: { ...SEED_VIEW, busy: true }, sizes: SEED_SIZES, sizesState: "done",
+  }), nextBust());
+  const recalc = r.nodes.find((n) => n.type === "button" && collectText(n).includes("重新统计体积"));
+  const verify = r.nodes.find((n) => n.type === "button" && collectText(n).includes("运行恢复前自检"));
+  assert.ok(recalc && verify, "env maintenance buttons missing");
+  assert.equal(recalc.props.disabled, true, "recalc must be disabled while busy");
+  assert.equal(verify.props.disabled, true, "restore-check must be disabled while busy");
+});
 section("结果");
 if (failures.length > 0) {
   for (const f of failures) process.stdout.write(`  ✗ ${f}\n`);

@@ -1300,55 +1300,67 @@ function apply(ctx, config) {
           // ---- v2：维护类端点（全部本地，零网络） ----
           case "sync-backup.prune": {
             // 手动清理本地产物：受 payload.maxDays / payload.keepLast 覆盖，缺省用配置值。
+            // 报告 5.3：删产物必须与备份串行 —— 打包正在写产物时清理会「删着读」或误删半成品。
+            // 权威判据是编排层的锁，不能只靠前端禁用按钮（其它入口同样会并发进来）。
             const body = payload && typeof payload === "object" ? payload : {};
             const keepDays = Number.isFinite(body.keepDays) ? body.keepDays : config.localKeepDays;
             const keepLast = Number.isFinite(body.keepLast) ? body.keepLast : config.keepLast;
-            const cleaned = await prune(dataDir, { keepDays, keepLast, now: new Date() });
-            const st = await statusSnapshot();
-            return okv({
-              removed: cleaned.removed,
-              bytesFreed: cleaned.bytesFreed,
-              kept: cleaned.kept,
-              view: st.view,
+            const done = await withRunLock("gui-prune", async () => {
+              const cleaned = await prune(dataDir, { keepDays, keepLast, now: new Date() });
+              return { removed: cleaned.removed, bytesFreed: cleaned.bytesFreed, kept: cleaned.kept };
             });
+            if (done && done.busy === true) return failv("busy", done.error ?? "已有一次备份在进行中，请稍后再试");
+            // 状态快照在锁**外**取：若在锁内调，statusSnapshot 会把本次 prune 自己算成 busy
+            // 回传进 view，前端据此禁掉按钮直到下次刷新才恢复。与 sync-backup.run 同一处置。
+            const st = await statusSnapshot();
+            return okv({ ...done, view: st.view });
           }
           case "sync-backup.restore-check": {
             // 对最近一份本地产物跑恢复前自检；没有产物就先打包一份进临时再检（不落盘）。
+            // 报告 5.3：自检会读产物 / 现打包，必须与备份串行 —— 打包正在写同一批文件时读到的是
+            // 半成品，自检结论不可信。锁是权威判据（旧的仅临时打包分支查 busy 已不足以覆盖读产物路径）。
             const body = payload && typeof payload === "object" ? payload : {};
-            const items = await listArtifacts(dataDir);
-            const target = body.name ? items.find((i) => i.name === body.name) : items[0];
-            let gz;
-            let checkManifest = null;
-            if (target) {
-              gz = await fs.readFile(target.file);
-            } else {
-              if (runBusy() || scheduler?.running === true) {
-                return failv("busy", "已有一次备份在进行中，请稍后再试");
+            // 锁是权威判据；再加一道 scheduler.running 早退，覆盖它已决定要跑、但尚未
+            // 拿到锁那一瞬（getConfig/getState 之间有 await）——宁可让用户稍后重试。
+            if (runBusy() || scheduler?.running === true) {
+              return failv("busy", "已有一次备份在进行中，请稍后再试");
+            }
+            const done = await withRunLock("gui-restore-check", async () => {
+              const items = await listArtifacts(dataDir);
+              const target = body.name ? items.find((i) => i.name === body.name) : items[0];
+              let gz;
+              let checkManifest = null;
+              if (target) {
+                gz = await fs.readFile(target.file);
+              } else {
+                // buildForCheck 只 collect + 内存打包，不碰锁，持锁调用不会重入死锁。
+                const built = await buildForCheck();
+                gz = built.gz;
+                checkManifest = built.manifest;
               }
-              const built = await buildForCheck();
-              gz = built.gz;
-              checkManifest = built.manifest;
-            }
-            let check;
-            // 本地产物是加密的，自检前必须先拿到 key —— 与 runOnce 里那份同源。
-            const keyInfo = await loadOrCreateKey(dataDir);
-            try {
-              check = await restoreCheck(gz, {
-                home,
-                manifest: checkManifest ?? [],
-                extract: true,
-                key: keyInfo.key,
-              });
-            } finally {
-              if (check) await cleanupTempDir(check.tempDir);
-            }
-            return okv({
-              source: target ? target.name : "(内存中新打的临时包)",
-              ok: check.ok,
-              errors: check.errors,
-              warnings: check.warnings,
-              stats: check.stats,
+              let check;
+              // 本地产物是加密的，自检前必须先拿到 key —— 与 runOnce 里那份同源。
+              const keyInfo = await loadOrCreateKey(dataDir);
+              try {
+                check = await restoreCheck(gz, {
+                  home,
+                  manifest: checkManifest ?? [],
+                  extract: true,
+                  key: keyInfo.key,
+                });
+              } finally {
+                if (check) await cleanupTempDir(check.tempDir);
+              }
+              return {
+                source: target ? target.name : "(内存中新打的临时包)",
+                ok: check.ok,
+                errors: check.errors,
+                warnings: check.warnings,
+                stats: check.stats,
+              };
             });
+            if (done && done.busy === true) return failv("busy", done.error ?? "已有一次备份在进行中，请稍后再试");
+            return okv(done);
           }
           // 检查白名单条目在本机的实际体积 —— 环境页要显示「勾这项要多大」。
           case "sync-backup.catalog-sizes": {

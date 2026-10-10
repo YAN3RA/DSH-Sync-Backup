@@ -472,6 +472,77 @@ async function runOnce(opts = {}) {
 }
 
 /**
+ * 报告 5.3：驱动**真实** plugin.apply() 并捕获 GUI RPC 的 dispatch，
+ * 用于验证维护类端点（prune / restore-check）与服务端备份锁的并发关系。
+ *
+ * opts.hold=true → 假 WebDAV 收到 PUT 后挂起不响应，让 runOnce 稳定卡在
+ * 「上传」阶段、持续持有编排层的锁；随后调 rpc("sync-backup.prune") 应被拒 busy。
+ * 结束前必须 releaseAndClose()：放行挂起的 PUT，runOnce 才会收尾、锁才会释放。
+ */
+async function runWithRpc(opts = {}) {
+  const home = await mkTmpHome();
+  const prevHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+
+  // 通道：走真实本地假 WebDAV（hold 与否由 opts.hold 决定），GitHub 关闭。
+  const wd = await startFakeWebdav({ hold: opts.hold === true });
+  const url = `http://127.0.0.1:${wd.port}/dav/`;
+  const syncDir = path.join(home, "dsh-config-manager", "sync");
+  await fs.mkdir(syncDir, { recursive: true });
+  await fs.writeFile(path.join(syncDir, "sync-config.json"), JSON.stringify({ webdav: { url, username: "u@example.com" } }), "utf8");
+  await fs.writeFile(path.join(home, ".credentials.yaml"), ["version: 1", "refs:", "  DSH_SYNC_BACKUP_WEBDAV_PASSWORD: pwd-test-value"].join("\n") + "\n", "utf8");
+
+  let dispatch = null;
+  // 假 connection 只暴露 rpc.handle —— mountRpc 会把 dispatch 交回来。
+  const connection = { rpc: { handle: (_ch, h) => { dispatch = h; return () => {}; } } };
+  const registered = [];
+  const ctx = {
+    tools: { register: (d) => registered.push(d) },
+    systemPrompt: { section: () => () => {} },
+    get: (name) => (name === "systemPrompt" ? ctx.systemPrompt : undefined),
+    // 同步回调 mountRpc（真实 webCtx 就绪时就是同步注入），借此捕获 dispatch
+    inject: (_deps, cb) => { cb({ connection, webServer: {}, effect: (fn) => fn() }); return () => {}; },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    effect: (fn) => fn(),
+  };
+  plugin.apply(
+    ctx,
+    plugin.Config.resolve({
+      dryRun: false,
+      webdavEnabled: true,
+      webdavUrl: url,
+      webdavUsername: "u@example.com",
+      githubEnabled: false,
+      githubRepo: "",
+      // 留产物：prune 有东西可清；restore-check 能读到本地产物走读文件路径
+      persistArchive: true,
+      restoreCheck: false,
+      schedulerEnabled: false,
+      startupRunOnBoot: false,
+    }),
+  );
+  if (typeof dispatch !== "function") {
+    await fs.rm(home, { recursive: true, force: true });
+    await wd.close();
+    process.env.DSH_HOME = prevHome;
+    throw new Error("RPC dispatch 未被挂载（inject/mountRpc 契约变化）");
+  }
+  const runTool = registered.find((x) => x.name === "sync_backup_run");
+  if (!runTool) { await fs.rm(home, { recursive: true, force: true }); await wd.close(); process.env.DSH_HOME = prevHome; throw new Error("sync_backup_run 工具未注册"); }
+  return {
+    home,
+    wd,
+    rpc: (endpoint, payload) => dispatch(endpoint, payload ?? {}),
+    startRun: () => runTool.execute({ upload: true }, {}),
+    async releaseAndClose() {
+      wd.release();
+      await wd.close();
+      await fs.rm(home, { recursive: true, force: true });
+      process.env.DSH_HOME = prevHome;
+    },
+  };
+}
+/**
  * Host 用 snapshotJsonValue 校验工具返回值：任何层级的 `undefined` 都会让整个
  * 工具调用以 `value is not lossless JSON` 失败（源：dsh-tools lib/index.js:2577-2578）。
  * 每个用例都过一遍 —— 只测到个别字段会漏掉同类缺陷。
@@ -498,8 +569,8 @@ async function readState(home) {
 }
 
 /* ---------- 假 WebDAV ---------- */
-async function startFakeWebdav() {
-  const state = { files: new Map(), requests: [] };
+async function startFakeWebdav(opts = {}) {
+  const state = { files: new Map(), requests: [], held: [], hold: opts.hold === true };
   const server = http.createServer((req, r) => {
     const url = new URL(req.url, "http://127.0.0.1");
     const key = decodeURIComponent(url.pathname);
@@ -514,6 +585,10 @@ async function startFakeWebdav() {
       }
       if (req.method === "PUT") {
         state.files.set(key, body);
+        // hold：存下响应句柄但不 end —— 客户端会卡在 upload，锁持续持有。
+        // 注意是对**每个** PUT 生效；release() 会同时关掉开关，
+        // 否则放行了归档 PUT，manifest/index 的 PUT 又挂起，runOnce 永远收不了尾。
+        if (state.hold) { state.held.push(r); return; }
         r.writeHead(201);
         return r.end();
       }
@@ -539,6 +614,7 @@ async function startFakeWebdav() {
   return {
     port: server.address().port,
     state,
+    release: () => { state.hold = false; for (const r of state.held) { try { r.writeHead(201); r.end(); } catch { /* ignore */ } } state.held.length = 0; },
     close: () => new Promise((res) => server.close(res)),
   };
 }
@@ -633,6 +709,48 @@ async function startFakeGithub(opts = {}) {
   };
 }
 
+section("[15] 报告 5.3：备份持锁期间，维护类 RPC 被服务端拒绝（权威重验，不靠前端禁用）");
+await checkAsync("上传进行中 → prune / restore-check 拒 busy；catalog-sizes 不受影响", async () => {
+  const f = await runWithRpc({ hold: true });
+  try {
+    // 让一次真实上传跑起来并卡在挂起的 PUT —— 编排层的锁此刻被它持有。
+    const runPromise = f.startRun();
+    let waited = 0;
+    while (!f.wd.state.requests.some((q) => q.method === "PUT")) {
+      await new Promise((res) => setTimeout(res, 20));
+      waited += 20;
+      if (waited > 5000) throw new Error("假 WebDAV 一直没收到 PUT，夹具失效");
+    }
+    const pruned = await f.rpc("sync-backup.prune", {});
+    if (pruned.ok !== false || pruned.error?.code !== "busy") {
+      throw new Error(`prune 应被 busy 拒绝，实际：${JSON.stringify(pruned).slice(0, 200)}`);
+    }
+    const rc = await f.rpc("sync-backup.restore-check", {});
+    if (rc.ok !== false || rc.error?.code !== "busy") {
+      throw new Error(`restore-check 应被 busy 拒绝，实际：${JSON.stringify(rc).slice(0, 200)}`);
+    }
+    // 设计取舍钉住：catalog-sizes 纯读源目录、不碰产物，刻意不持锁 ——
+    // 持锁的话，一次 GB 级目录扫描会卡住整个备份排期，代价远大于收益。
+    const sizes = await f.rpc("sync-backup.catalog-sizes", {});
+    if (sizes.ok !== true) throw new Error(`catalog-sizes 不应被 busy 影响：${JSON.stringify(sizes).slice(0, 200)}`);
+    f.wd.release();
+    await runPromise;
+  } finally {
+    await f.releaseAndClose();
+  }
+});
+
+await checkAsync("空闲时 prune 正常执行且返回视图里 busy=false（锁外取状态）", async () => {
+  const f = await runWithRpc({ hold: false });
+  try {
+    const r = await f.rpc("sync-backup.prune", { keepDays: 0, keepLast: 0 });
+    if (r.ok !== true) throw new Error(`空闲 prune 应成功：${JSON.stringify(r).slice(0, 200)}`);
+    if (!Array.isArray(r.value?.removed)) throw new Error("prune 结果缺 removed 数组");
+    if (r.value?.view?.busy === true) throw new Error("锁内取状态被自己污染：view.busy 应为 false");
+  } finally {
+    await f.releaseAndClose();
+  }
+});
 console.log("\n=== 结果 ===");
 if (failed === 0) {
   console.log(`channels-smoke: 通过 ${passed} / 失败 0\n全部通过。`);
