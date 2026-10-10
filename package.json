@@ -1,0 +1,78 @@
+{
+  "name": "dsh-sync-backup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH timed backup: packs the memory layer (memory/handoff/skills/storages/sessions) that dsh-config-manager does not cover and uploads it to WebDAV + GitHub. No third-party npm dependencies; the two declared peers are provided by the harness.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "backup",
+    "webdav",
+    "github",
+    "cordis"
+  ],
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./lib/collect.js": "./lib/collect.js",
+    "./lib/archive.js": "./lib/archive.js",
+    "./lib/state.js": "./lib/state.js",
+    "./lib/scheduler.js": "./lib/scheduler.js",
+    "./lib/webdav.js": "./lib/webdav.js",
+    "./lib/github.js": "./lib/github.js",
+    "./lib/creds.js": "./lib/creds.js",
+    "./lib/artifacts.js": "./lib/artifacts.js",
+    "./lib/restore-check.js": "./lib/restore-check.js",
+    "./lib/crypto.js": "./lib/crypto.js",
+    "./lib/keyring.js": "./lib/keyring.js",
+    "./lib/user-config.js": "./lib/user-config.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib/",
+    "tools/",
+    "README.md",
+    "LICENSE"
+  ],
+  "comment:peerDependencies": "Required by the DSH loader, not a runtime dependency. For a `link:` install the plugin is reached through a symlink, so Node resolves bare specifiers from the plugin's real on-disk location, where no harness packages exist; app-boot only intercepts a linked package when the plugin itself declares that peer (readPeerNames at lib/types/profile-resolution/resolver.js). Omitting these makes the plugin fail to load with ERR_MODULE_NOT_FOUND on @deepseek-ai/schemastery. Nothing is installed from them: the profile sets autoInstallPeers=false and the harness supplies both packages.",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection"
+      ]
+    }
+  },
+  "scripts": {
+    "dry-run": "node tools/dry-run.mjs",
+    "dry-run:full": "node tools/dry-run.mjs --full",
+    "webdav-smoke": "node tools/webdav-smoke.mjs",
+    "github-smoke": "node tools/github-smoke.mjs",
+    "scheduler-smoke": "node tools/scheduler-smoke.mjs",
+    "scheduler-plan": "node tools/scheduler-plan.mjs",
+    "channels-smoke": "node --import ./tools/_hooks-register.mjs tools/channels-smoke.mjs",
+    "set-webdav-password": "node tools/set-webdav-password.mjs",
+    "set-github-token": "node tools/set-github-token.mjs",
+    "client-smoke": "node tools/client-smoke.mjs",
+    "client-contract": "node tools/client-contract.mjs",
+    "crypto-smoke": "node tools/crypto-smoke.mjs",
+    "host-gates": "node tools/host-gates.mjs",
+    "smoke": "node --import ./tools/_hooks-register.mjs tools/smoke.mjs",
+    "test": "npm run smoke && npm run client-smoke && npm run client-contract && npm run crypto-smoke && npm run webdav-smoke && npm run github-smoke && npm run scheduler-smoke && npm run channels-smoke && npm run dry-run"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

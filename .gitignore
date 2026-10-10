@@ -1,0 +1,50 @@
+# Do not commit anything that can hold a secret or a machine-local path.
+#
+# The rule behind this file: if losing it would lose data, or publishing it would
+# hand someone a key, it does not belong in git.
+
+# Credentials and keys — never
+.credentials.yaml
+*.credentials.yaml
+**/key.b64
+**/key.b64.*
+**/*.key
+**/*.pem
+**/*.p12
+*.env
+.env.*
+!.env.example
+
+# Runtime state written by the plugin itself
+**/dsh-sync-backup/
+**/state.json
+**/state.json.tmp-*
+**/config.json.bak
+**/artifacts/
+
+# Install tree: the plugin is consumed via `link:`, not vendored
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Build and editor noise
+dist/
+build/
+coverage/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.tsbuildinfo
+
+# Local scratch used while developing
+_dump/
+_diag/
+_research/
+_probe-*.mjs
+.tmp-*.mjs
+*.local.md
+
+# Also exempt from mirroring: the Local package cache npm refreshes routinely
+package-lock.json.bak

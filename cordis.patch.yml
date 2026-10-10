@@ -1,0 +1,87 @@
+# dsh-sync-backup — bundle patch layer.
+#
+# Profile-bundle patches compose over an EMPTY entry list (launcher
+# composition), so this patch is an `insert` appending one composition row.
+#
+# ⚠️ `id` 必须与 index.js 的 `export const name` 逐字一致（先例：
+# dsh-plugin-gate 的 `const name = "gate"` ↔ `- id: gate`）。
+- insert:
+    - id: sync-backup
+      name: 'dsh-sync-backup'
+      config:
+        enabled: true
+        # ---- v3：这些都是「出厂默认」，不是你必须手改的东西 ----
+        # 用户在设置页（设置 → 备份与同步）改出来的值写进
+        # $DSH_HOME/dsh-sync-backup/config.json，优先级高于本文件。
+        # 也就是说：改本文件 = 改默认值；改设置页 = 改这一台怎么跑。
+        # 想整体回到默认，删掉那份 config.json 即可，不用重装插件。
+        # ---- v2：本地打包周期 vs 远端同步周期（需求②）----
+        intervalHours: 12
+        # 0 = 每次本地打包后立刻同步；>0 时不得小于 intervalHours（否则按
+        # intervalHours 对齐）。「一天本地 4 次、远端只同步 1 次」= 6 / 24。
+        remoteIntervalHours: 0
+        startupMinIntervalMs: 3600000
+        maxBackoffHours: 24
+        # 单份载荷实测约 30 MB（44 MB 源 → gzip 30 MB，压缩率 ~69%），
+        # 7 份 ≈ 210 MB 远端占用（体积随时长增长，务必按实际状态重估）
+        keepLast: 7
+        includeSessions: true
+        includeSemantic: true
+        # ---- v2：本地产物（需求⑤）----
+        # ⚠️ 缺省 false —— 本地不留归档是既有边界（磁盘上的归档谁都能读）。
+        # 打开后产物落在 $DSH_HOME/<dataDir>/artifacts/，按下面两个值过期清理。
+        persistArchive: false
+        localKeepDays: 7
+        # ---- v2：恢复前自检（需求⑥）----
+        # 每次打包后把归档解到**临时目录**验证能否还原；不覆盖任何现有文件。
+        restoreCheck: false
+        # ---- v2：备份条目勾选（需求④）----
+        # 留空 = 用默认集合（除 profiles 外全选）。可用 id 见 lib/collect.js 的 CATALOG：
+        # persona / memory-config / memory / skills / task-board / sync-config /
+        # storages / sessions / profiles
+        selectedPaths: []
+        # ⚠️ 保持 true：runOnce 会拒绝任何 upload=true 调用（保护闸门）。
+        # 确认要真实上传时改为 false —— 这属写类动作，须先与用户确认。
+        dryRun: true
+        webdavPath: 'dsh-backup/'
+        # ---- v2：WebDAV 独立配置（需求③）----
+        # 显式填了这两个值就完全不看 config-manager 的配置。
+        # 坚果云示例 url: 'https://dav.jianguoyun.com/dav/'
+        webdavUrl: ''
+        webdavUsername: ''
+        # WebDAV 通道开关。只用 GitHub 时置 false —— 否则该通道缺失会被记为半失败。
+        webdavEnabled: true
+        # 口令引用：留空 = 用本插件槽位 DSH_SYNC_BACKUP_WEBDAV_PASSWORD。
+        # ⚠️ 不再回退 config-manager 的槽位 —— 借别人的专用密码会让可用性绑在别的
+        # 插件上。首次使用需用 tools/set-webdav-password.mjs 录一次（脚本不问口令原文回显）。
+        webdavCredentialRef: ''
+        # 15.5 MB 载荷 + 网盘 302 跳预签名直链，超时须留足余量
+        webdavTimeoutMs: 300000
+        # ---- GitHub 通道（contents API，仓库必须私有）----
+        # 格式 owner/repo；留空 = 跳过该通道（不影响 WebDAV）。
+        githubRepo: ''
+        githubPath: 'dsh-backup/'
+        # 令牌引用：留空 = 用 DSH_SYNC_BACKUP_GITHUB_TOKEN 槽位；
+        # 该通道是新加的，无历史槽位可回退，缺失即整通道跳过（不计半失败）。
+        githubCredentialRef: ''
+        # 是否额外写一份 latest.tar.gz 稳定副本（便于固定 URL 取最新）。
+        githubWriteLatest: true
+        # 留空 = 用仓库默认分支。
+        githubBranch: ''
+        githubTimeoutMs: 300000
+        # 连续 N 轮半失败（部分通道成功）后把 state.needsAttention 置真，提示人工介入。
+        partialAlertAfter: 3
+        dataDir: 'dsh-sync-backup'
+        promptSection: true
+        sectionOrder: 30
+        # ---- P4 定时器 ----
+        # 总开关（关掉后只剩手动 sync_backup_run）。
+        schedulerEnabled: true
+        # ⚠️ 定时跑是否**自动上传**。缺省 false —— 定时只做本地打包（零网络）。
+        # 必须同时把这里设为 true **且** dryRun 设为 false 才会出网；
+        # 两者都是写类动作，须先经用户确认。
+        uploadOnSchedule: false
+        # 启动时是否允许立即补跑一次（仍受 startupMinIntervalMs 约束）。
+        startupRunOnBoot: true
+        # ---- GitHub PAT（P3 通道凭据）----
+        # 令牌一律走凭据槽位，**绝不写在此文件里**。槽位见 README「凭据槽位」一节。
