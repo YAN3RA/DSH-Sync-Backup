@@ -12,13 +12,26 @@
  *  - 303 非 GET 降级为 GET 并丢弃请求体
  *  - 重定向上限 5 跳
  *  - readIndex 三态（404 missing / 200 合法 / 非法 JSON 抛错 / 缺 entries 抛错）
- *  - uploadSnapshot 的顺序契约（MKCOL → 归档 → manifest → 读索引 → 删最旧 → **最后写索引**）
+ *  - uploadSnapshot 的顺序契约（MKCOL → 归档 → manifest → 读索引 → **写新索引** → 删最旧）
+ *    —— 删除必须在索引之后：先删后写一旦索引失败，远端就留下指向已删对象的悬空索引。
+ *  - 索引信任边界：旧条目必须精确等于本插件生成的文件名，否则整轮不删任何东西
  *  - keepLast 保留策略（只删最旧，保留最新 N 条）
  *  - 口令脱敏（原文与 URL 编码形态都不出现在错误消息里）
  */
 
 import assert from "node:assert/strict";
 import { WebDavClient, WebDavError, classifyStatus, joinUrl, REDACTED } from "../lib/webdav.js";
+
+/**
+ * 造一个**形态合法**的快照 id（YYYYMMDD-HHMMSS-8位hex）。
+ *
+ * 索引守卫要求旧条目精确等于本插件会生成的文件名，所以测试夹具不能再随手写
+ * "new" / "old-1" 这类占位串 —— 它们会被正确地判为不可信。
+ */
+function snapId(seed = 0) {
+  const n = String(seed).padStart(8, "0").slice(-8);
+  return `20261010-1200${String(seed % 60).padStart(2, "0")}-${n}`;
+}
 
 let passed = 0;
 let failed = 0;
@@ -306,11 +319,12 @@ await checkAsync("调用顺序 = MKCOL → PUT归档 → PUT manifest → GET索
     return undefined;
   });
   const c = makeClient(request);
+  const SID = snapId(1);
   await c.uploadSnapshot({
     dir: "dsh-backup/",
-    id: "snap-1",
+    id: SID,
     archive: Buffer.from("ARCHIVE"),
-    manifest: { fileCount: 1, totalBytes: 10, archiveSha256: "deadbeef" },
+    manifest: { fileCount: 1, totalBytes: 10 },
     keepLast: 7,
   });
   // 取最后一段路径（集合 URL 以 / 结尾时保留该斜杠，因为 MKCOL 的目标就是集合本身）
@@ -321,8 +335,8 @@ await checkAsync("调用顺序 = MKCOL → PUT归档 → PUT manifest → GET索
   const seq = request.calls.map((x) => `${x.method} ${tail(x.url)}`);
   assert.deepEqual(seq, [
     "MKCOL dsh-backup/",
-    "PUT snap-1.tar.gz",
-    "PUT snap-1.manifest.json",
+    `PUT ${SID}.tar.gz`,
+    `PUT ${SID}.manifest.json`,
     "GET dsh-backup-index.json",
     "PUT dsh-backup-index.json",
   ]);
@@ -338,13 +352,13 @@ await checkAsync("索引在归档全部写完后才写（meta-last）", async ()
   const c = makeClient(request);
   await c.uploadSnapshot({
     dir: "dsh-backup/",
-    id: "snap-1",
+    id: snapId(2),
     archive: Buffer.alloc(0),
     manifest: {},
   });
   const idx = request.calls.findIndex((x) => x.url.endsWith("dsh-backup-index.json") && x.method === "PUT");
   const archivePut = request.calls.findIndex((x) => x.url.endsWith(".tar.gz") && x.method === "PUT");
-  assert.ok(idx > archivePut, "索引必须先于归档？不，索引必须晚于归档");
+  assert.ok(idx > archivePut, "索引必须晚于归档与 manifest 落盘");
 });
 
 await checkAsync("Content-Type 正确", async () => {
@@ -355,7 +369,7 @@ await checkAsync("Content-Type 正确", async () => {
     return undefined;
   });
   const c = makeClient(request);
-  await c.uploadSnapshot({ dir: "dsh-backup/", id: "s", archive: Buffer.alloc(0), manifest: {} });
+  await c.uploadSnapshot({ dir: "dsh-backup/", id: snapId(3), archive: Buffer.alloc(0), manifest: {} });
   const gz = request.calls.find((x) => x.method === "PUT" && x.url.endsWith(".tar.gz"));
   const mf = request.calls.find((x) => x.method === "PUT" && x.url.endsWith(".manifest.json"));
   assert.equal(gz.options.headers["Content-Type"], "application/gzip");
@@ -366,14 +380,15 @@ await checkAsync("Content-Type 正确", async () => {
 
 section("8. keepLast 保留策略");
 
-await checkAsync("超出 keepLast 时删除最旧，且 DELETE 早于最终 PUT 索引", async () => {
+await checkAsync("超出 keepLast 时删除最旧，且**先写索引再删除**", async () => {
   const old = [];
   for (let i = 1; i <= 3; i += 1) {
+    const oid = snapId(i);
     old.push({
-      id: `old-${i}`,
+      id: oid,
       createdAt: `2026-10-0${i}T00:00:00.000Z`,
-      archive: `old-${i}.tar.gz`,
-      manifestFile: `old-${i}.manifest.json`,
+      archive: `${oid}.tar.gz`,
+      manifestFile: `${oid}.manifest.json`,
     });
   }
   const existing = JSON.stringify({ schemaVersion: 1, entries: old });
@@ -386,9 +401,10 @@ await checkAsync("超出 keepLast 时删除最旧，且 DELETE 早于最终 PUT 
     return undefined;
   });
   const c = makeClient(request);
+  const newest = snapId(9);
   const out = await c.uploadSnapshot({
     dir: "dsh-backup/",
-    id: "new",
+    id: newest,
     archive: Buffer.alloc(0),
     manifest: {},
     keepLast: 3,
@@ -396,17 +412,20 @@ await checkAsync("超出 keepLast 时删除最旧，且 DELETE 早于最终 PUT 
 
   // 3 旧 + 1 新 = 4，keepLast=3 → 裁掉 1 条最旧
   assert.equal(out.index.entries.length, 3);
-  assert.ok(!out.index.entries.some((e) => e.id === "old-1"), "最旧的 old-1 应被裁掉");
-  assert.ok(out.index.entries.some((e) => e.id === "new"));
+  assert.ok(!out.index.entries.some((e) => e.id === old[0].id), "最旧的一条应被裁掉");
+  assert.ok(out.index.entries.some((e) => e.id === newest));
 
   const dels = request.calls.filter((x) => x.method === "DELETE").map((x) => x.url.split("/").pop());
-  assert.deepEqual(dels.sort(), ["old-1.manifest.json", "old-1.tar.gz"]);
+  assert.deepEqual(dels.sort(), [`${old[0].id}.manifest.json`, `${old[0].id}.tar.gz`]);
 
+  // ⭐ 本次修复的核心：索引 PUT 必须**早于**任何 DELETE。
+  //    反过来（先删后写）一旦索引失败，远端就留下指向已删对象的悬空索引。
   const lastPut = [...request.calls].reverse().find((x) => x.method === "PUT");
   assert.ok(lastPut.url.endsWith("dsh-backup-index.json"), "最后一次 PUT 必须是索引");
   const firstDelete = request.calls.findIndex((x) => x.method === "DELETE");
   const lastPutIdx = request.calls.length - 1 - [...request.calls].reverse().findIndex((x) => x.method === "PUT");
-  assert.ok(firstDelete < lastPutIdx, "删除必须早于最后写索引");
+  assert.ok(firstDelete > lastPutIdx, "索引必须先写，删除在其后");
+  assert.equal(out.indexTrusted, true);
 });
 
 await checkAsync("未超限时不删除任何东西", async () => {
@@ -417,15 +436,16 @@ await checkAsync("未超限时不删除任何东西", async () => {
     return undefined;
   });
   const c = makeClient(request);
-  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: "only", archive: Buffer.alloc(0), manifest: {}, keepLast: 7 });
+  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: snapId(4), archive: Buffer.alloc(0), manifest: {}, keepLast: 7 });
   assert.equal(out.pruned.length, 0);
   assert.equal(request.calls.filter((x) => x.method === "DELETE").length, 0);
 });
 
 await checkAsync("同 id 覆盖而非追加", async () => {
+  const dup = snapId(5);
   const existing = JSON.stringify({
     schemaVersion: 1,
-    entries: [{ id: "dup", createdAt: "2026-01-01T00:00:00.000Z", archive: "dup.tar.gz", manifestFile: "dup.manifest.json" }],
+    entries: [{ id: dup, createdAt: "2026-10-01T00:00:00.000Z", archive: `${dup}.tar.gz`, manifestFile: `${dup}.manifest.json` }],
   });
   const request = recorder((method) => {
     if (method === "MKCOL") return res(405);
@@ -435,17 +455,20 @@ await checkAsync("同 id 覆盖而非追加", async () => {
     return undefined;
   });
   const c = makeClient(request);
-  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: "dup", archive: Buffer.alloc(0), manifest: {} });
-  assert.equal(out.index.entries.filter((e) => e.id === "dup").length, 1);
+  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: dup, archive: Buffer.alloc(0), manifest: {} });
+  assert.equal(out.index.entries.filter((e) => e.id === dup).length, 1);
 });
 
-await checkAsync("删除失败不中断上传（记入 pruned）", async () => {
-  const old = Array.from({ length: 2 }, (_, i) => ({
-    id: `o${i}`,
-    createdAt: `2026-10-0${i + 1}T00:00:00.000Z`,
-    archive: `o${i}.tar.gz`,
-    manifestFile: `o${i}.manifest.json`,
-  }));
+await checkAsync("删除失败不中断上传（记入 pruneFailed，索引照写）", async () => {
+  const old = Array.from({ length: 2 }, (_, i) => {
+    const oid = snapId(20 + i);
+    return {
+      id: oid,
+      createdAt: `2026-10-0${i + 1}T00:00:00.000Z`,
+      archive: `${oid}.tar.gz`,
+      manifestFile: `${oid}.manifest.json`,
+    };
+  });
   const request = recorder((method) => {
     if (method === "MKCOL") return res(405);
     if (method === "PUT") return res(201);
@@ -454,10 +477,110 @@ await checkAsync("删除失败不中断上传（记入 pruned）", async () => {
     return undefined;
   });
   const c = makeClient(request);
-  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: "new", archive: Buffer.alloc(0), manifest: {}, keepLast: 1 });
+  const newest = snapId(29);
+  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: newest, archive: Buffer.alloc(0), manifest: {}, keepLast: 1 });
   assert.equal(out.index.entries.length, 1);
-  assert.equal(out.index.entries[0].id, "new");
-  assert.ok(out.pruned.some((x) => x.includes("失败")), "删除失败应记入 pruned");
+  assert.equal(out.index.entries[0].id, newest);
+  // 删除失败：不抛错、不影响索引，失败项单独记录，留下孤儿等下轮收
+  assert.ok(out.pruneFailed.length > 0, "删除失败应记入 pruneFailed");
+  assert.equal(out.pruned.length, 0);
+  const idxPut = request.calls.filter((x) => x.method === "PUT" && x.url.endsWith("dsh-backup-index.json"));
+  assert.equal(idxPut.length, 1, "索引仍然只写一次且成功");
+});
+
+// ── 索引信任边界：报告 1.5 的核心回归 ──────────────────────────────────────
+
+await checkAsync("索引含目录穿越路径 → 一个文件都不删", async () => {
+  const evil = [
+    { id: "20261010-120000-deadbeef", createdAt: "2026-10-01T00:00:00.000Z", archive: "../../../../etc/passwd", manifestFile: "../../../x.json" },
+    { id: "20261010-120001-deadbeef", createdAt: "2026-10-02T00:00:00.000Z", archive: "20261010-120001-deadbeef.tar.gz", manifestFile: "20261010-120001-deadbeef.manifest.json" },
+    { id: "20261010-120002-deadbeef", createdAt: "2026-10-03T00:00:00.000Z", archive: "20261010-120002-deadbeef.tar.gz", manifestFile: "20261010-120002-deadbeef.manifest.json" },
+  ];
+  const request = recorder((method) => {
+    if (method === "MKCOL") return res(405);
+    if (method === "PUT") return res(201);
+    if (method === "GET") return res(200, JSON.stringify({ schemaVersion: 1, entries: evil }));
+    if (method === "DELETE") return res(204);
+    return undefined;
+  });
+  const c = makeClient(request);
+  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: snapId(30), archive: Buffer.alloc(0), manifest: {}, keepLast: 1 });
+  assert.equal(out.indexTrusted, false, "索引含非法条目应判为不可信");
+  assert.ok(out.indexRejected.length >= 1);
+  assert.equal(request.calls.filter((x) => x.method === "DELETE").length, 0, "不可信索引下必须零删除");
+});
+
+await checkAsync("索引条目是绝对路径 / 盘符 / 空 id 也一律拒绝", async () => {
+  const bad = [
+    { id: "20261010-120000-deadbeef", archive: "/etc/passwd", manifestFile: "/etc/shadow" },
+    { id: "20261010-120000-deadbeef", archive: "C:\\Windows\\x.tar.gz", manifestFile: "y.json" },
+    { id: "not-a-snapshot-id", archive: "not-a-snapshot-id.tar.gz", manifestFile: "not-a-snapshot-id.manifest.json" },
+    { id: "20261010-120000-deadbeef", archive: "20261010-120000-deadbeef.tar.gz?x=1", manifestFile: "20261010-120000-deadbeef.manifest.json" },
+  ];
+  for (const entry of bad) {
+    const request = recorder((method) => {
+      if (method === "MKCOL") return res(405);
+      if (method === "PUT") return res(201);
+      if (method === "GET") return res(200, JSON.stringify({ schemaVersion: 1, entries: [entry] }));
+      if (method === "DELETE") return res(204);
+      return undefined;
+    });
+    const c = makeClient(request);
+    const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: snapId(31), archive: Buffer.alloc(0), manifest: {}, keepLast: 1 });
+    assert.equal(out.indexTrusted, false, `应拒绝: ${JSON.stringify(entry)}`);
+    assert.equal(request.calls.filter((x) => x.method === "DELETE").length, 0);
+  }
+});
+
+await checkAsync("索引里的合法旧条目仍能正常参与保留计算", async () => {
+  const good = [];
+  for (let i = 0; i < 4; i += 1) {
+    const oid = snapId(40 + i);
+    good.push({ id: oid, createdAt: `2026-10-0${i + 1}T00:00:00.000Z`, archive: `${oid}.tar.gz`, manifestFile: `${oid}.manifest.json` });
+  }
+  const request = recorder((method) => {
+    if (method === "MKCOL") return res(405);
+    if (method === "PUT") return res(201);
+    if (method === "GET") return res(200, JSON.stringify({ schemaVersion: 1, entries: good }));
+    if (method === "DELETE") return res(204);
+    return undefined;
+  });
+  const c = makeClient(request);
+  const newest = snapId(49);
+  const out = await c.uploadSnapshot({ dir: "dsh-backup/", id: newest, archive: Buffer.alloc(0), manifest: {}, keepLast: 2 });
+  assert.equal(out.indexTrusted, true, "合法索引应被信任");
+  assert.equal(out.index.entries.length, 2);
+  assert.equal(request.calls.filter((x) => x.method === "DELETE").length, 6, "4+1-2=3 条被裁，各删 archive+manifest");
+});
+
+// ── 路径规范化（报告 1.4） ────────────────────────────────────────────────
+
+await checkAsync("webdavPath 含穿越/反斜杠/控制字符 → 拒绝", async () => {
+  const c = makeClient(recorder(() => res(405)));
+  const bad = ["../evil", "a/../../b", "a//b", "a\\b", "a?b", "a#b", "a%b", "a\u0000b", "./x"];
+  for (const p of bad) {
+    await assert.rejects(
+      () => c.uploadSnapshot({ dir: p, id: snapId(50), archive: Buffer.alloc(0), manifest: {} }),
+      (e) => e instanceof WebDavError,
+      `应拒绝 dir=${JSON.stringify(p)}`,
+    );
+  }
+});
+
+await checkAsync("webdavPath 中文/空格正常，且逐段 URL 编码", async () => {
+  const request = recorder((method) => {
+    if (method === "MKCOL") return res(405);
+    if (method === "PUT") return res(201);
+    if (method === "GET") return res(404);
+    return undefined;
+  });
+  const c = makeClient(request);
+  const sid = snapId(51);
+  await c.uploadSnapshot({ dir: "备份 目录/dsh-backup", id: sid, archive: Buffer.alloc(0), manifest: {} });
+  const mk = request.calls.find((x) => x.method === "MKCOL");
+  assert.ok(mk.url.includes(encodeURIComponent("备份 目录")), `应逐段编码: ${mk.url}`);
+  assert.ok(!mk.url.includes("备份"), `URL 里不该出现未编码的中文: ${mk.url}`);
+  assert.ok(mk.url.endsWith("/dsh-backup/"));
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

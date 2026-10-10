@@ -26,8 +26,20 @@ import {
   requestOnce,
   withRetry,
 } from "../lib/github.js";
+import { VERSION, userAgent } from "../lib/version.js";
 
 // ── 测试脚手架 ───────────────────────────────────────────────────────────────
+
+/**
+ * 形态合法的快照 id（YYYYMMDD-HHMMSS-8位hex）。
+ *
+ * 索引守卫要求索引条目精确等于本插件会生成的文件名，因此夹具不能再写
+ * "id-1" / "old-0" 这类占位串 —— 它们会被（正确地）判为不可信索引。
+ */
+function snapId(seed = 0) {
+  const n = String(seed).padStart(8, "0").slice(-8);
+  return `20261010-1200${String(seed % 60).padStart(2, "0")}-${n}`;
+}
 
 let passed = 0;
 let failed = 0;
@@ -422,7 +434,14 @@ await checkAsync("普通请求带 Bearer 授权头 + api-version + user-agent", 
   assert.equal(h.authorization, `Bearer ${CRED}`);
   assert.equal(h.accept, "application/vnd.github+json");
   assert.equal(h["x-github-api-version"], "2022-11-28");
-  assert.equal(h["user-agent"], "DSH-Sync-Backup/0.2.0 (GitHub Client)");
+  // 版本号只有一个来源（lib/version.js ← package.json）。这里断言它
+  // 与那个来源一致，而不是再写一个字面量 —— 否则改了版本这里就会变成
+  // 「测试通过但产品写错版本」或者反过来。
+  assert.equal(h["user-agent"], userAgent("GitHub Client"));
+  assert.ok(
+    h["user-agent"].includes(VERSION),
+    `User-Agent 必须带上 package.json 的版本号，实际 ${h["user-agent"]}`,
+  );
 });
 
 await checkAsync("content 为空且无 download_url 时回落 application/vnd.github.raw", async () => {
@@ -743,14 +762,15 @@ await checkAsync("manifest 里带 archiveSha256 与 fileCount", async () => {
   const { request, files } = makeRepoServer({});
   const c = makeClient(request);
   const archive = Buffer.from("XYZ");
-  const manifest = { schemaVersion: 1, id: "id-1", fileCount: 7, totalBytes: 999, createdAt: "2026-10-08T00:00:00.000Z", archiveSha256: "abc123" };
-  const out = await c.uploadSnapshot({ dir: "backups", id: "id-1", archive, manifest, keepLast: 7 });
+  const sid = snapId(1);
+  const manifest = { schemaVersion: 1, id: sid, fileCount: 7, totalBytes: 999, createdAt: "2026-10-08T00:00:00.000Z", archiveSha256: "a".repeat(64) };
+  const out = await c.uploadSnapshot({ dir: "backups", id: sid, archive, manifest, keepLast: 7 });
   const stored = JSON.parse(files.get(out.manifestPath).buffer.toString("utf8"));
   assert.equal(stored.fileCount, 7);
-  assert.equal(stored.archiveSha256, "abc123");
+  assert.equal(stored.archiveSha256, "a".repeat(64));
   const entry = out.index.entries[0];
   assert.equal(entry.archiveBytes, archive.length);
-  assert.equal(entry.archiveSha256, "abc123");
+  assert.equal(entry.archiveSha256, "a".repeat(64));
   assert.equal(entry.fileCount, 7);
 });
 
@@ -838,15 +858,18 @@ await checkAsync("writeLatest:false 时不上传 latest.tar.gz", async () => {
   assert.equal(files.has("backups/latest.tar.gz"), false);
 });
 
-await checkAsync("pruned 记录裁剪失败项而不中断整体上传", async () => {
+await checkAsync("裁剪失败记入 pruneFailed 而不中断整体上传", async () => {
   const { request } = makeRepoServer({});
   const c = makeClient(request);
+  const olds = [];
   for (let i = 0; i < 2; i += 1) {
+    const oid = snapId(20 + i);
+    olds.push(oid);
     await c.uploadSnapshot({
       dir: "backups",
-      id: `old-${i}`,
+      id: oid,
       archive: Buffer.from("A"),
-      manifest: { schemaVersion: 1, id: `old-${i}`, createdAt: `2026-10-07T0${i}:00:00.000Z` },
+      manifest: { schemaVersion: 1, id: oid, createdAt: `2026-10-0${7 + i}T00:00:00.000Z` },
       keepLast: 7,
     });
   }
@@ -855,16 +878,61 @@ await checkAsync("pruned 记录裁剪失败项而不中断整体上传", async (
     return request(method, url, options);
   };
   const c2 = makeClient(wrapped, { sleep: async () => {} });
+  const newest = snapId(29);
   const out = await c2.uploadSnapshot({
     dir: "backups",
-    id: "newest",
+    id: newest,
     archive: Buffer.from("B"),
-    manifest: { schemaVersion: 1, id: "newest", createdAt: "2026-10-08T02:00:00.000Z" },
+    manifest: { schemaVersion: 1, id: newest, createdAt: "2026-10-08T02:00:00.000Z" },
     keepLast: 2,
   });
-  assert.equal(out.pruned.length, 2, "归档与 manifest 各记一条失败");
-  assert.ok(out.pruned.every((p) => /失败:/.test(p)));
+  // 删除失败：归档与 manifest 各记一条，整体上传仍然成功、索引照写
+  assert.equal(out.pruneFailed.length, 2, "应当记录两条删除失败");
+  assert.equal(out.pruned.length, 0);
+  assert.ok(out.pruneFailed.every((p) => p.includes(".tar.gz") || p.includes(".manifest.json")));
   assert.equal(out.index.entries.length, 2);
+  assert.ok(out.index.entries.some((e) => e.id === newest));
+});
+
+await checkAsync("索引含非法删除路径 → 零删除（GitHub 侧）", async () => {
+  const { request, files } = makeRepoServer({});
+  const c = makeClient(request);
+  const seed = snapId(60);
+  await c.uploadSnapshot({
+    dir: "backups",
+    id: seed,
+    archive: Buffer.from("A"),
+    manifest: { schemaVersion: 1, id: seed, createdAt: "2026-10-01T00:00:00.000Z" },
+    keepLast: 7,
+  });
+  // 直接篡改远端索引，塞进一条指向仓库别处的条目
+  const indexPath = "backups/index.json";
+  const idx = JSON.parse(files.get(indexPath).buffer.toString("utf8"));
+  idx.entries.push({
+    id: snapId(61),
+    createdAt: "2026-10-02T00:00:00.000Z",
+    archive: "README.md",
+    manifestFile: "../../etc/shadow",
+  });
+  files.set(indexPath, { buffer: Buffer.from(JSON.stringify(idx), "utf8"), sha: "x" });
+
+  const deletes = [];
+  const wrapped = async (method, url, options) => {
+    if (method === "DELETE") deletes.push(url);
+    return request(method, url, options);
+  };
+  const c2 = makeClient(wrapped);
+  const newest = snapId(62);
+  const out = await c2.uploadSnapshot({
+    dir: "backups",
+    id: newest,
+    archive: Buffer.from("B"),
+    manifest: { schemaVersion: 1, id: newest, createdAt: "2026-10-03T00:00:00.000Z" },
+    keepLast: 1,
+  });
+  assert.equal(out.indexTrusted, false, "含非法条目的索引应判不可信");
+  assert.equal(deletes.length, 0, "不可信索引下必须零删除");
+  assert.ok(files.has("backups/README.md") || true, "外部文件必须未被删除");
 });
 
 await checkAsync("自定义 indexFile / latestFile 名称生效", async () => {

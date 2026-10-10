@@ -33,7 +33,10 @@
         persistArchive: false
         localKeepDays: 7
         # ---- v2：恢复前自检（需求⑥）----
-        # 每次打包后把归档解到**临时目录**验证能否还原；不覆盖任何现有文件。
+        # 每次打包后做**内存解包校验**：解密 → 解 tar → 逐条比 SHA256 与 manifest。
+        # ⚠️ 它**不解到磁盘**、不覆盖任何文件；需要真正解包验证请用维护页的
+        # 「恢复自检」（那里走 extract:true，解到系统临时目录后立刻删除）。
+        # 校验失败会把本次运行判为未通过并置 restoreCheckFailed 健康位。
         restoreCheck: false
         # ---- v2：备份条目勾选（需求④）----
         # 留空 = 用默认集合（除 profiles 外全选）。可用 id 见 lib/collect.js 的 CATALOG：

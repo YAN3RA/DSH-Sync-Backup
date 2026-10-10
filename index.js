@@ -432,11 +432,57 @@ function apply(ctx, config) {
     };
   }
 
+  /* ---------------- 单次运行互斥（single-flight） ---------------- */
+
+  // 为什么要有一把**贯穿所有入口**的锁：
+  // scheduler 自己有 `running`，GUI 的 sync-backup.run 也会查它，但 agent 工具
+  // `sync_backup_run` 是直接进 runOnce 的，而 runOnce 本身不做互斥。于是「定时器
+  // 刚触发 + 用户点立即备份 + agent 调工具」可以同时跑起来，后果是：同时打包占多份
+  // 内存、两次上传同时读改写远端索引（后者覆盖前者的条目）、两次 state 读改写互相
+  // 覆盖 runs/failures、清理产物与自检同时跑导致文件被删着读。
+  //
+  // 锁放在**编排层**（这里）而不是 scheduler.js：runOnce 在 scheduler 里是注入依赖，
+  // 锁加在注入点才能覆盖 agent 工具 / GUI / 维护 RPC / 定时器全部调用口。
+  let runLock = null;
+
+  /**
+   * 拿锁执行。已有人持锁时不排队、立刻返回 `{ok:false, busy:true}` ——
+   * 备份是幂等的重活，让后来者明确失败比默默排队更好诊断。
+   */
+  async function withRunLock(reason, fn) {
+    if (runLock !== null) {
+      return {
+        at: new Date().toISOString(),
+        reason,
+        ok: false,
+        busy: true,
+        error: `已有一次备份在进行中（${runLock.reason}，开始于 ${runLock.startedAt}）`,
+        errorKind: "busy",
+      };
+    }
+    const token = { reason, startedAt: new Date().toISOString() };
+    runLock = token;
+    try {
+      return await fn();
+    } finally {
+      // 只释放自己持有的那把：万一被更外层逻辑替换过，不要误清掉别人的。
+      if (runLock === token) runLock = null;
+    }
+  }
+
+  /** 当前是否已有一次备份在跑（维护类操作据此拒绝并发）。 */
+  function runBusy() {
+    return runLock !== null;
+  }
+
   /**
    * 执行一次备份。
    *
    * `upload: false`（默认）= 只收集 / 打包 / 回验，**零网络**。
    * `upload: true` = 额外真实上传到 WebDAV，并回读比对 SHA256；`dryRun` 为真时仍拒绝出网。
+   *
+   * 注意：**不要直接调这个函数** —— 外部入口一律走 `runExclusive()`，
+   * 否则会绕过单次运行互斥。
    */
   async function runOnce({ upload = false, reason = "manual" } = {}) {
     const startedAt = Date.now();
@@ -456,6 +502,26 @@ function apply(ctx, config) {
       let picked = entries;
       if (!config.includeSessions) picked = picked.filter((e) => !e.path.startsWith("sessions/"));
       if (!config.includeSemantic) picked = picked.filter((e) => !e.path.startsWith("memory/semantic/"));
+
+      // ⚠️ manifest 必须在**裁剪之后**重新生成。
+      // collect() 产出的 manifest.files 是裁剪前的全量清单；若拿它去比对归档，
+      // 用户关掉 sessions 时自检会把「本来就没打算打包的条目」判成丢失 —— 一个
+      // 完全正常的配置会稳定地报错。这里按最终 picked 重建，保证 hash 与条目数一致。
+      const finalManifest = {
+        ...manifest,
+        fileCount: picked.length,
+        totalBytes: picked.reduce((n, e) => n + e.size, 0),
+        files: picked.map((e) => ({
+          path: e.path,
+          size: e.size,
+          sha256: e.sha256,
+          mtimeMs: e.mtimeMs,
+        })),
+        filters: {
+          includeSessions: config.includeSessions,
+          includeSemantic: config.includeSemantic,
+        },
+      };
 
       // 3) 结构性自检：危险路径一律中止
       const hits = picked.filter((e) => isForbidden(e.path));
@@ -487,7 +553,7 @@ function apply(ctx, config) {
         gzBytes,
         ratio: rawBytes > 0 ? Number((gzBytes / rawBytes).toFixed(4)) : 0,
         sourceBytes: picked.reduce((n, e) => n + e.size, 0),
-        manifestFileCount: manifest.fileCount,
+        manifestFileCount: finalManifest.fileCount,
       };
       result.encrypted = true;
       if (keyCreated) result.keyCreated = true;
@@ -506,13 +572,17 @@ function apply(ctx, config) {
         result.pruned = { removed: cleaned.removed.length, bytesFreed: cleaned.bytesFreed };
       }
 
-      // 4c) 恢复前自检（需求⑥）—— 解到临时目录，绝不写 $DSH_HOME
+      // 4c) 恢复前自检（需求⑥）—— 绝不写 $DSH_HOME
+      //
+      // 术语澄清：这里做的是**内存解包校验**（extract:false）——证明这份归档能被
+      // 解出来且逐条 sha256 对得上，而不是「解到临时目录的可恢复性检查」。
+      // 后者的入口在维护页（extract:true），两件事不要混为一谈。
       if (config.restoreCheck) {
         let check;
         try {
           check = await restoreCheck(gz, {
             home,
-            manifest: manifest.files,
+            manifest: finalManifest.files,
             archiveVersion: RUNTIME_VERSION,
             runtimeVersion: RUNTIME_VERSION,
             extract: false,
@@ -524,6 +594,15 @@ function apply(ctx, config) {
             warnings: check.warnings,
             stats: check.stats,
           };
+          // 自检失败**不能**让整次备份还显示为完全成功 —— 用户开了自检就是把
+          // 「能恢复」当作这次的验收条件。这里显式置一个独立健康位，状态页与
+          // 概览据此显示告警，而不是把失败埋在详情里。
+          if (!check.ok) {
+            result.restoreCheckFailed = true;
+            result.ok = false;
+            result.error = `恢复自检未通过：${check.errors.join("；")}`;
+            result.errorKind = "restore-check";
+          }
         } finally {
           if (check) await cleanupTempDir(check.tempDir);
         }
@@ -539,7 +618,7 @@ function apply(ctx, config) {
         // ---- WebDAV ----
         if (config.webdavEnabled) {
           try {
-            const up = await uploadArchive({ gz, manifest, id });
+            const up = await uploadArchive({ gz, manifest: finalManifest, id });
             const verify = await verifyRemote({
               client: up.client,
               archiveUrl: up.archiveUrl,
@@ -591,7 +670,7 @@ function apply(ctx, config) {
             };
           } else {
             try {
-              const up = await uploadGitHubArchive({ gz, manifest, id, tokenInfo });
+              const up = await uploadGitHubArchive({ gz, manifest: finalManifest, id, tokenInfo });
               const verify = await verifyGithubRemote({
                 client: up.client,
                 archivePath: up.archivePath,
@@ -689,6 +768,11 @@ function apply(ctx, config) {
         lastError: result.ok ? null : result.error,
         lastErrorKind: result.errorKind ?? null,
         lastDurationMs: result.durationMs ?? null,
+        // 自检失败的独立健康位：只有这次真跑了自检才更新它，
+        // 关掉 restoreCheck 时保留上一次的结果而不是悄悄抹掉。
+        restoreCheckFailed:
+          result.restoreCheck !== undefined ? result.restoreCheckFailed === true : (prev.restoreCheckFailed ?? false),
+        lastRestoreCheck: result.restoreCheck ?? prev.lastRestoreCheck ?? null,
         runs: (prev.runs ?? 0) + 1,
         failures: result.ok ? 0 : (prev.failures ?? 0) + 1,
       };
@@ -697,6 +781,20 @@ function apply(ctx, config) {
       /* 状态写失败属非致命，直接忽略以免影响宿主 */
     }
     return result;
+  }
+
+  /**
+   * 所有外部入口的统一入口：**拿锁 → runOnce → 落 state**。
+   *
+   * 谁必须走这里：agent 工具 `sync_backup_run`、GUI RPC `sync-backup.run`、
+   * 定时器注入的 `runOnce`、以及任何将来新增的触发口。直接调 `runOnce` 会绕过互斥。
+   */
+  async function runExclusive(opts = {}) {
+    const reason = opts.reason ?? "manual";
+    // 只负责持锁：state 的读改写仍留在 runOnce 尾部（那里才拿得到 channels /
+    // partialStreak 这些本次运行独有的字段）。因为 runOnce 整段都在锁内执行，
+    // 那次 saveState 同样受保护 —— 两次并发运行不会再互相覆盖 runs/failures。
+    return await withRunLock(reason, async () => await runOnce(opts));
   }
 
   /* ---------------- 定时器（P4） ---------------- */
@@ -721,7 +819,8 @@ function apply(ctx, config) {
       startupRunOnBoot: config.startupRunOnBoot,
     }),
     getState: async () => await loadState(dataDir),
-    runOnce: async (o) => await runOnce(o),
+    // 走 runExclusive：定时触发与手动触发共享同一把锁
+    runOnce: async (o) => await runExclusive(o),
     log: {
       info: (m) => ctx.logger?.info?.(`[sync-backup] ${m}`),
       warn: (m, e) => ctx.logger?.warn?.(`[sync-backup] ${m}`, e),
@@ -833,7 +932,7 @@ function apply(ctx, config) {
         ? "fail"
         : st.lastPartial === true
           ? "partial"
-          : scheduler?.running === true
+          : runBusy() || scheduler?.running === true
             ? "running"
             : st.lastRunOk === true
               ? "ok"
@@ -862,7 +961,10 @@ function apply(ctx, config) {
       lastError: st.lastError ?? null,
       lastErrorKind: st.lastErrorKind ?? null,
       nextRunAt: scheduler?.nextRunAt ? scheduler.nextRunAt.toISOString() : null,
-      busy: scheduler?.running === true,
+      // 以编排层的锁为权威判据：手动/工具/定时三种触发都算「忙」
+      busy: runBusy(),
+      // 自检失败是独立健康位：它不该被混进普通 lastError 里被忽略
+      restoreCheckFailed: st.restoreCheckFailed === true,
       enabled: config.enabled,
       dryRun: config.dryRun,
       webdavEnabled: config.webdavEnabled,
@@ -975,7 +1077,12 @@ function apply(ctx, config) {
     },
     execute: async (args) => {
       const wantUpload = args.upload === true;
-      const r = await runOnce({ upload: wantUpload, reason: wantUpload ? "manual-upload" : "manual" });
+      const r = await runExclusive({ upload: wantUpload, reason: wantUpload ? "manual-upload" : "manual" });
+      // busy 是「没跑」而不是「跑失败了」：明确回一个可判定的形状，
+      // 让调用方知道该重试而不是去查故障。
+      if (r.busy === true) {
+        return { ok: false, busy: true, reason: r.reason, error: r.error, text: `已有备份在进行中：${r.error}` };
+      }
       // ⚠️ 工具返回值要过 Host 的两道校验，二者对「缺值」的处置相反：
       //  1) lossless JSON（dsh-tools lib/index.js:2577-2578 snapshotJsonValue）——
       //     任意层级出现 `undefined` 就让整个调用以
@@ -1083,8 +1190,9 @@ function apply(ctx, config) {
           }
           case "sync-backup.run": {
             // 只做本地打包，零网络；真实上传不在 GUI 通道内暴露。
-            if (scheduler?.running === true) return failv("busy", "已有一次备份在进行中，请稍后再试");
-            const r = await runOnce({ upload: false, reason: "gui" });
+            // 锁是权威判据（scheduler.running 只覆盖定时器那一路）。
+            const r = await runExclusive({ upload: false, reason: "gui" });
+            if (r.busy === true) return failv("busy", r.error ?? "已有一次备份在进行中，请稍后再试");
             const st = await statusSnapshot();
             if (!r.ok) return failv("backup-failed", r.error ?? "备份失败");
             return okv({
@@ -1123,7 +1231,9 @@ function apply(ctx, config) {
             if (target) {
               gz = await fs.readFile(target.file);
             } else {
-              if (scheduler?.running === true) return failv("busy", "已有一次备份在进行中，请稍后再试");
+              if (runBusy() || scheduler?.running === true) {
+                return failv("busy", "已有一次备份在进行中，请稍后再试");
+              }
               const built = await buildForCheck();
               gz = built.gz;
               checkManifest = built.manifest;

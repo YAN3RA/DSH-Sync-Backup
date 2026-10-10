@@ -68,9 +68,10 @@
     "client-smoke": "node tools/client-smoke.mjs",
     "client-contract": "node tools/client-contract.mjs",
     "crypto-smoke": "node tools/crypto-smoke.mjs",
+    "security-smoke": "node tools/security-smoke.mjs",
     "host-gates": "node tools/host-gates.mjs",
     "smoke": "node --import ./tools/_hooks-register.mjs tools/smoke.mjs",
-    "test": "npm run smoke && npm run client-smoke && npm run client-contract && npm run crypto-smoke && npm run webdav-smoke && npm run github-smoke && npm run scheduler-smoke && npm run channels-smoke && npm run dry-run"
+    "test": "npm run smoke && npm run security-smoke && npm run client-smoke && npm run client-contract && npm run crypto-smoke && npm run webdav-smoke && npm run github-smoke && npm run scheduler-smoke && npm run channels-smoke && npm run dry-run"
   },
   "engines": {
     "node": ">=20"

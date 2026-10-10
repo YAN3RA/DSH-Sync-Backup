@@ -206,6 +206,28 @@ await checkAsync("连续两次半失败 → partialStreak=2，阈值 3 时未触
   }
 });
 
+await checkAsync("并发触发（3 个入口同时开跑）→ 只有一个真跑，其余 busy", async () => {
+  const home = await mkTmpHome();
+  try {
+    const outs = await runOnce({ webdav: "ok", github: "fail", home, partialAlertAfter: 3, concurrent: true });
+    const ran = outs.filter((o) => o.busy !== true && o.errorKind !== "busy");
+    const busy = outs.filter((o) => o.busy === true || o.errorKind === "busy");
+    if (outs.length !== 3) throw new Error(`应发起 3 次，实际 ${outs.length}`);
+    if (ran.length !== 1) throw new Error(`只应有一次真正执行，实际 ${ran.length} 次`);
+    if (busy.length !== 2) throw new Error(`另外两次应报 busy，实际 ${busy.length} 次`);
+    // busy 的形状必须可判定：调用方据此重试而不是去查故障
+    for (const b of busy) {
+      if (typeof b.error !== "string" || b.error.length === 0) throw new Error("busy 必须带可读原因");
+    }
+    // 关键：state 只被那次真正执行写了一次，没有互相覆盖
+    const st = await readState(home);
+    if (st.runs !== 1) throw new Error(`state.runs 应为 1（无并发覆盖），实际 ${st.runs}`);
+    if (st.partialStreak !== 1) throw new Error(`partialStreak 应为 1，实际 ${st.partialStreak}`);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
 await checkAsync("半失败后一次全成功 → 计数归零、告警复位", async () => {
   const home = await mkTmpHome();
   try {
@@ -409,12 +431,31 @@ async function runOnce(opts = {}) {
       restoreCheck: false,
       partialAlertAfter: opts.partialAlertAfter ?? 3,
       keepLast: opts.keepLast ?? 7,
+      // ⚠️ 必须关掉调度器与启动补跑。
+      // 它们会在 apply() 时并发发起一次真实 runOnce；用例随后显式调工具时，
+      // 编排层的单次运行锁会把那次显式调用判成 busy —— 于是本用例实际只跑了
+      // 一次，累加断言失真。（这在加锁之前是「两次并发读写 state 互相覆盖」，
+      // 竞态恰好凑出期望值，所以问题一直被掩盖着。）
+      // 本文件测的是 runOnce 的编排与状态累加，不测调度器 —— 关掉才是干净的夹具。
+      schedulerEnabled: false,
+      startupRunOnBoot: false,
     }),
   );
   const runTool = registered.find((r) => r.name === "sync_backup_run");
   let out;
   try {
-    out = await runTool.execute({ upload: true }, {});
+    if (opts.concurrent === true) {
+      // 并发用例：对**同一个实例**同时发起多次运行。
+      // 这正是审查报告 2.2 描述的场景（定时器刚触发 + 用户点立即备份 + agent 调工具），
+      // 也是唯一能真正验证单次运行互斥的形状 —— 顺序调用每次都新建实例，锁无从体现。
+      out = await Promise.all([
+        runTool.execute({ upload: true }, {}),
+        runTool.execute({ upload: true }, {}),
+        runTool.execute({ upload: true }, {}),
+      ]);
+    } else {
+      out = await runTool.execute({ upload: true }, {});
+    }
   } finally {
     process.env.DSH_HOME = prevHome;
   }
@@ -422,6 +463,10 @@ async function runOnce(opts = {}) {
   if (autoWebdav) await autoWebdav.close();
   if (autoGithub) await autoGithub.close();
   if (autoClean) await fs.rm(home, { recursive: true, force: true });
+  if (opts.concurrent === true) {
+    for (const o of out) assertLossless(o);
+    return out;
+  }
   assertLossless(out);
   return out;
 }

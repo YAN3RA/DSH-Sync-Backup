@@ -11,7 +11,7 @@ copies. Local packing is always available; both upload channels are off until yo
 
 | What you asked for | How it is done |
 | --- | --- |
-| No outbound network until I say so | `webdavEnabled` and `githubEnabled` both default to **false**. A fresh install packs locally and touches nothing off-machine. |
+| No outbound network until I say so | At the **schema** level `webdavEnabled` and `githubEnabled` both default to `false`; the bundled `cordis.patch.yml` then sets `webdavEnabled: true` while `webdavUrl` / `webdavUsername` stay empty. An enabled channel with no target is **skipped**, not attempted — so a fresh install still packs locally and touches nothing off-machine. `dryRun: true` is the hard gate on top of that. Read the **effective** values off the panel's Overview tab rather than assuming either layer. |
 | Keep the archive on disk | `persistArchive`'s **schema default** is `true`. The value that actually applies is resolved in layers (`config.json` > `cordis.patch.yml` > schema default), so read the effective value off the panel's Overview tab instead of assuming. Artifacts land **encrypted** in `$DSH_HOME/dsh-sync-backup/artifacts/`. |
 | Encrypt it | Every archive goes through **AES-256-GCM** before it touches disk or network. The key is generated on first run and never leaves the machine. |
 | Stop making me edit YAML | Changes made in the settings panel are written to `$DSH_HOME/dsh-sync-backup/config.json`, which **overrides** the patch file. Delete that file to fall back to defaults. |
@@ -131,7 +131,8 @@ defaults. The merge uses `??` rather than `||` — with `||` there would be no w
 
 Key settings: `enabled`, `intervalHours` (12), `remoteIntervalHours` (0 = sync after every local pack),
 `keepLast` (7), `persistArchive` (schema default true; patch/config can override), `localKeepDays` (7), `restoreCheck` (false), `selectedPaths`
-(empty = everything except `profiles`), `dryRun` (**true** — the upload gate), `webdavEnabled` /
+(empty = everything except `profiles`), `dryRun` (**true** — the upload gate; schema default, patch keeps it),
+`webdavEnabled` (schema default `false`, patch sets `true`; a channel with no target is skipped) /
 `webdavUrl` / `webdavUsername` / `webdavPath`, `githubEnabled` / `githubRepo` / `githubPath`,
 `uploadOnSchedule` (false). The full list is in `cordis.patch.yml`.
 

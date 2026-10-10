@@ -9,9 +9,11 @@
  */
 
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   MAGIC,
@@ -24,7 +26,17 @@ import {
   decryptBytes,
   isEncrypted,
 } from "../lib/crypto.js";
-import { keyPath, loadOrCreateKey, saveKey, hasKey, restoreFromCode, KEY_FILENAME } from "../lib/keyring.js";
+import {
+  keyPath,
+  loadOrCreateKey,
+  saveKey,
+  hasKey,
+  keyStatus,
+  decodeKeyStrict,
+  KeyError,
+  restoreFromCode,
+  KEY_FILENAME,
+} from "../lib/keyring.js";
 import {
   configPath,
   loadUserConfig,
@@ -32,6 +44,8 @@ import {
   mergeConfig,
   pickEditable,
   sanitizeEditable,
+  checkNumberRange,
+  NUMBER_BOUNDS,
   GUI_EDITABLE_KEYS,
 } from "../lib/user-config.js";
 
@@ -259,13 +273,104 @@ await check("并发调用共享一次创建（不撞 tmp 文件名）", async ()
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-await check("损坏的 key 文件会被替换而不是让插件起不来", async () => {
+// ---------------------------------------------------------------------------
+// 1.1 的回归：坏 key **绝不能**被悄悄替换成新 key，否则旧归档永久不可解。
+// 这一组曾经断言的是相反的行为（"损坏会被替换"），那正是本次修复要推翻的契约。
+// ---------------------------------------------------------------------------
+
+/** 建一个放着指定 key 原文的临时 dataDir。 */
+async function keyDirWith(text) {
   const dir = await tmpDir("dsh-sync-backup-key-");
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, KEY_FILENAME), "not-base64!!", "utf8");
+  await fs.writeFile(path.join(dir, KEY_FILENAME), text, "utf8");
+  return dir;
+}
+
+await check("key 不存在 → 创建（唯一允许生成的分支）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-key-");
   const got = await loadOrCreateKey(dir);
   assert.equal(got.created, true);
-  assert.equal(sameKey(got.key, Buffer.from((await fs.readFile(keyPath(dir), "utf8")).trim(), "base64")), true);
+  assert.equal(got.key.length, 32);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+await check("损坏的 key 抛错，且原文件一个字节都不动", async () => {
+  const broken = "not-base64!!";
+  const dir = await keyDirWith(broken);
+  await assert.rejects(
+    () => loadOrCreateKey(dir),
+    (err) => err instanceof KeyError && /无法解析/.test(err.message),
+    "坏 key 必须显式失败，不能回退成「生成新密钥」",
+  );
+  // 核心断言：原文件仍在，内容未变。若这里被覆盖，用户的旧归档就再也打不开了。
+  assert.equal(await fs.readFile(keyPath(dir), "utf8"), broken, "坏 key 文件被改写了");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+await check("长度为 32 字节但非规范的 key 也要拒绝（宽容解码陷阱）", async () => {
+  // 这是最阴的一类：宽容的 Buffer.from(x,'base64') 能解出 32 字节，
+  // 长度检查会通过，但密钥是错的 —— 直到解密才炸，那时已经晚了。
+  // 构造：把最后一组的第 3 个字符从 'A'(0) 改成 'B'(1)。多余的低位会被
+  // 宽容解码丢掉，于是解出**同样 32 字节**，但再编码回去就不是原文了。
+  const sneaky = "A".repeat(42) + "B=";
+  assert.equal(Buffer.from(sneaky, "base64").length, 32, "前置条件：确实解出 32 字节");
+  assert.notEqual(Buffer.from(sneaky, "base64").toString("base64"), sneaky, "前置条件：确实非规范");
+  const dir = await keyDirWith(sneaky);
+  await assert.rejects(() => loadOrCreateKey(dir), (err) => err instanceof KeyError);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+await check("错误长度 / 空文件 / 含非法字符 一律抛 KeyError", async () => {
+  for (const bad of ["", Buffer.alloc(16).toString("base64"), "abc\ndef ghi!!", "A".repeat(44)]) {
+    const dir = await keyDirWith(bad);
+    await assert.rejects(
+      () => loadOrCreateKey(dir),
+      (err) => err instanceof KeyError,
+      `${JSON.stringify(bad.slice(0, 12))} 应被拒绝`,
+    );
+    assert.equal(await fs.readFile(keyPath(dir), "utf8"), bad);
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+await check("合法 key 正常读出（且 created:false）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-key-");
+  const first = await loadOrCreateKey(dir);
+  await new Promise((r) => setTimeout(r, 0));
+  const again = await loadOrCreateKey(dir);
+  assert.equal(again.created, false);
+  assert.ok(sameKey(first.key, again.key));
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+await check("decodeKeyStrict 往返一致（规范 base64 不被误杀）", async () => {
+  const key = randomBytes(32);
+  assert.ok(decodeKeyStrict(key.toString("base64")).equals(key));
+  // 结尾换行是编辑器常见的「好心」，trim 之后仍应接受
+  assert.ok(decodeKeyStrict(key.toString("base64") + "\n").equals(key));
+});
+
+await check("keyStatus 只读：缺失不创建，损坏不改写", async () => {
+  const dir = await tmpDir("dsh-sync-backup-key-");
+  assert.deepEqual(await keyStatus(dir), { status: "missing" });
+  // 关键：查过状态之后，key.b64 仍不该出现 —— 打开设置页不能产生写副作用
+  assert.equal(await hasKey(dir), false, "keyStatus 不该创建密钥");
+
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, KEY_FILENAME), "broken!!", "utf8");
+  const st = await keyStatus(dir);
+  assert.equal(st.status, "invalid");
+  assert.equal(await fs.readFile(keyPath(dir), "utf8"), "broken!!", "keyStatus 不该改写文件");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+await check("keyStatus 对可用密钥返回指纹（不泄露密钥本体）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-key-");
+  const { key } = await loadOrCreateKey(dir);
+  const st = await keyStatus(dir);
+  assert.equal(st.status, "ok");
+  assert.match(st.fingerprint, /^[0-9a-f]{16}$/);
+  assert.ok(!st.fingerprint.includes(key.toString("base64").slice(0, 8)), "指纹不该是密钥片段");
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -365,6 +470,110 @@ await check("空改动 → accepted 为空（调用方据此返回 bad-request�
   const out = sanitizeEditable({});
   assert.equal(Object.keys(out.accepted).length, 0);
   assert.equal(out.problems.length, 0);
+});
+
+// ---------------------------------------------------------------
+// 2.4：数值的业务范围（不只是「是数字」）
+// ---------------------------------------------------------------
+
+await check("intervalHours=0 被拒（否则界面显示 0、实际按 12 跑）", async () => {
+  const out = sanitizeEditable({ intervalHours: 0 });
+  assert.equal(out.accepted.intervalHours, undefined, "0 必须被拒");
+  assert.ok(out.problems.some((p) => /周期/.test(p)), `应有可读原因，实际 ${JSON.stringify(out.problems)}`);
+});
+
+await check("keepLast=0 被拒（本地与远端会给出不同语义）", async () => {
+  const out = sanitizeEditable({ keepLast: 0 });
+  assert.equal(out.accepted.keepLast, undefined);
+  assert.ok(out.problems.length > 0);
+});
+
+await check("本地与远端周期都不接受小数（周期是整小时）", async () => {
+  for (const key of ["intervalHours", "remoteIntervalHours", "keepLast", "localKeepDays"]) {
+    const out = sanitizeEditable({ [key]: 1.5 });
+    assert.equal(out.accepted[key], undefined, `${key} 不该接受小数`);
+  }
+});
+
+await check("remoteIntervalHours=0 合法（语义：每次本地打包后同步）", async () => {
+  const out = sanitizeEditable({ remoteIntervalHours: 0 });
+  assert.equal(out.accepted.remoteIntervalHours, 0);
+  assert.equal(out.problems.length, 0);
+});
+
+await check("超出上限的大数被拒", async () => {
+  for (const [key, v] of [["keepLast", 99999], ["intervalHours", 24 * 365], ["localKeepDays", 99999]]) {
+    const out = sanitizeEditable({ [key]: v });
+    assert.equal(out.accepted[key], undefined, `${key}=${v} 应被拒`);
+  }
+});
+
+await check("checkNumberRange 与 NUMBER_BOUNDS 是同一份口径（供 UI/host/调度器共用）", async () => {
+  for (const [key, b] of Object.entries(NUMBER_BOUNDS)) {
+    assert.equal(checkNumberRange(key, b.min).ok, true, `${key} 的下界应合法`);
+    assert.equal(checkNumberRange(key, b.max).ok, true, `${key} 的上界应合法`);
+    assert.equal(checkNumberRange(key, b.min - 1).ok, false, `${key} 低于下界应被拒`);
+    assert.equal(checkNumberRange(key, b.max + 1).ok, false, `${key} 高于上界应被拒`);
+  }
+});
+
+await check("手工把越界数值写进 config.json → 载入时被丢弃（回落到默认）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-cfg-");
+  await fs.mkdir(dir, { recursive: true });
+  // 用户用编辑器直接改文件，绕过 sanitizeEditable
+  await fs.writeFile(
+    configPath(dir),
+    JSON.stringify({ schemaVersion: 1, intervalHours: 0, keepLast: -5, enabled: false }),
+    "utf8",
+  );
+  const got = await loadUserConfig(dir);
+  assert.equal(got.intervalHours, undefined, "越界的 intervalHours 不该进入配置");
+  assert.equal(got.keepLast, undefined, "负的 keepLast 不该进入配置");
+  assert.equal(got.enabled, false, "非数值键不受影响");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+await check("并发保存不丢更新（同一文件读改写串行化）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-cfg-");
+  // 三次并发保存不同键：若没有串行化，后写者会基于旧快照把别人的键抹掉
+  await Promise.all([
+    saveUserConfig(dir, { keepLast: 3 }),
+    saveUserConfig(dir, { intervalHours: 6 }),
+    saveUserConfig(dir, { localKeepDays: 2 }),
+  ]);
+  const got = await loadUserConfig(dir);
+  assert.equal(got.keepLast, 3, `keepLast 丢了：${JSON.stringify(got)}`);
+  assert.equal(got.intervalHours, 6, `intervalHours 丢了：${JSON.stringify(got)}`);
+  assert.equal(got.localKeepDays, 2, `localKeepDays 丢了：${JSON.stringify(got)}`);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------
+// 4.1：真实出厂默认值 = schema 默认 ⊕ cordis.patch.yml
+// ---------------------------------------------------------------
+//
+// 只断言 Config 的 schema 默认值是**不够的** —— patch 的显式值会覆盖它，
+// 而用户实际拿到的是合并后的那一层。这里直接解析 patch 文件，
+// 保证文档承诺与出厂行为是同一种东西。
+
+await check("cordis.patch.yml 的显式值与 README 描述一致（合并后才算数）", async () => {
+  const patchPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "cordis.patch.yml");
+  const yml = await fs.readFile(patchPath, "utf8");
+  /** 从 patch 里取某个键的标量值（够用即可，不引入 YAML 依赖）。 */
+  const scalar = (key) => {
+    const m = new RegExp(`^\\s*${key}:\\s*(.+?)\\s*$`, "m").exec(yml);
+    if (!m) return undefined;
+    return m[1].replace(/^['"]|['"]$/g, "");
+  };
+
+  // 这几条是 README「How it is done」表里明确承诺过的行为
+  assert.equal(scalar("persistArchive"), "false", "patch 的 persistArchive 应为 false（README 已按分层解析说明）");
+  assert.equal(scalar("webdavEnabled"), "true", "patch 的 webdavEnabled 应为 true（目标为空时会被 skip）");
+  assert.equal(scalar("webdavUrl"), "", "出厂 webdavUrl 必须为空，否则会真的外传");
+  assert.equal(scalar("webdavUsername"), "", "出厂 webdavUsername 必须为空");
+  assert.equal(scalar("dryRun"), "true", "出厂 dryRun 必须为 true（上传闸门）");
+  assert.equal(scalar("uploadOnSchedule"), "false", "出厂不得自动上传");
+  assert.equal(scalar("githubRepo"), "", "出厂 githubRepo 必须为空");
 });
 
 /* ============================================================
