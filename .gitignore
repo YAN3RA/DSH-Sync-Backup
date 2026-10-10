@@ -45,7 +45,9 @@ _research/
 _probe-*.mjs
 .tmp-*.mjs
 *.local.md
+# 提交信息临时文件（git commit -F 用）—— 别让它们进树
 _commitmsg.tmp
+*.tmp
 
 # Also exempt from mirroring: the Local package cache npm refreshes routinely
 package-lock.json.bak
