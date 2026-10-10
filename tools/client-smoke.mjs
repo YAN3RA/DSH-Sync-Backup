@@ -902,6 +902,42 @@ check("英文确认门不含 CJK", async () => {
   const cjk = joined.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g);
   assert.equal(cjk, null, `CJK leaked: ${JSON.stringify(cjk)}`);
 });
+/* —— 9.8 报告 5.4：可访问性契约 —— */
+check("tablist：四 tab 有 aria-controls 指向当前 tabpanel，roving tabindex 只让选中项可聚焦", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({ tab: "channels" }), nextBust());
+  const tabs = r.nodes.filter((n) => n.props?.role === "tab");
+  assert.equal(tabs.length, 4);
+  const panel = r.nodes.find((n) => n.props?.role === "tabpanel");
+  assert.ok(panel, "tabpanel missing");
+  assert.equal(panel.props.id, "dsb-panel-channels", `panel id=${panel.props.id}`);
+  assert.equal(panel.props["aria-labelledby"], "dsb-tab-channels", "panel must point back at its tab");
+  for (const t of tabs) assert.equal(t.props["aria-controls"], "dsb-panel-channels", "all tabs control the visible panel");
+  const sel = tabs.filter((t) => t.props["aria-selected"] === "true");
+  assert.equal(sel.length, 1);
+  assert.equal(sel[0].props.tabIndex, 0, "selected tab must be focusable");
+  assert.ok(tabs.filter((t) => t !== sel[0]).every((t) => t.props.tabIndex === -1), "unselected tabs must be tabIndex=-1");
+});
+check("tablist 挂键盘导航（←/→/Home/End 处理函数存在）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor(), nextBust());
+  const list = r.nodes.find((n) => n.props?.role === "tablist");
+  assert.ok(list, "tablist missing");
+  assert.equal(typeof list.props.onKeyDown, "function", "tablist needs onKeyDown");
+});
+check("确认对话框：Escape 有处理且 aria-modal（通道确认与恢复码确认都算）", async () => {
+  const rc = await renderSerial("zh-CN", seedsFor({ recoveryPending: true }), nextBust());
+  const dlg = rc.nodes.find((n) => n.props?.role === "alertdialog");
+  assert.ok(dlg, "recovery confirm missing");
+  assert.equal(dlg.props["aria-modal"], true, "alertdialog should be aria-modal");
+  assert.equal(typeof dlg.props.onKeyDown, "function", "alertdialog must handle Escape");
+  // 通道目的地确认（ConfirmBlock）：pending 键数组非空即渲染
+  const ch = await renderSerial("zh-CN", seedsFor({ tab: "channels" }), nextBust());
+  const ok = ch.nodes.some((n) => n.props?.role === "alertdialog" && typeof n.props.onKeyDown === "function");
+  // 无待确认改动时对话框不出现 —— 只验证「出现时必有 Escape」，不能强求它在种子态渲染
+  if (!ok) {
+    const list = ch.nodes.filter((n) => n.props?.role === "alertdialog");
+    assert.equal(list.length, 0, "channels tab without pending changes must not render a dialog");
+  }
+});
 section("结果");
 if (failures.length > 0) {
   for (const f of failures) process.stdout.write(`  ✗ ${f}\n`);
