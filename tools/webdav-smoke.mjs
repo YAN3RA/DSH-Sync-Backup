@@ -603,7 +603,11 @@ const server = http.createServer((req, res2) => {
   }
   if (req.url === "/cross-origin-hop") {
     res2.statusCode = 302;
-    res2.setHeader("Location", `http://127.0.0.1:${port + 1}/dest`);
+    // 必须用 server2 的真实端口：`port + 1` 只是「两个 listen(0) 恰好连续」的
+    // 巧合，Linux runner 上不成立（端口由内核分配，中间可能被别的 socket 占走），
+    // 于是跨源跳转打到没人监听的端口 → ECONNREFUSED，而本机 Windows 恰好连续
+    // 所以本地全绿。见下方 `port2` 的赋值顺序（先 listen 完再发请求）。
+    res2.setHeader("Location", `http://127.0.0.1:${port2}/dest`);
     return res2.end();
   }
   if (req.url === "/see-other") {
@@ -618,6 +622,19 @@ const server = http.createServer((req, res2) => {
   }
   if (req.url === "/no-location") {
     res2.statusCode = 302;
+    return res2.end();
+  }
+  if (req.url === "/meta-hop") {
+    // SSRF 靶子：云元数据端点。这条拦截与「起点是不是公网」无关，所以用
+    // loopback 服务端也能端到端验证 defaultRequest 真的会拒绝跟随。
+    res2.statusCode = 302;
+    res2.setHeader("Location", "http://169.254.169.254/latest/meta-data/iam/security-credentials/");
+    return res2.end();
+  }
+  if (req.url === "/https-to-http-hop") {
+    // HTTPS → 非本机 HTTP 降级：明文 HTTP 只允许本机，跨目标一律拒绝。
+    res2.statusCode = 302;
+    res2.setHeader("Location", "http://plain.example.com/dest");
     return res2.end();
   }
   if (req.url === "/dest") {
@@ -718,6 +735,96 @@ await checkAsync("超时 → TimeoutError 归一为 WebDavError(kind=timeout)", 
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+section("9b. 重定向目标逐跳复验（2.2 · 纯函数）");
+const tg = await import("../lib/transport-guard.js");
+
+check("loopback 判定覆盖 127/8、localhost、::1，且拒绝 127.0.0.256 这类伪地址", () => {
+  for (const h of ["127.0.0.1", "127.1.2.3", "localhost", "foo.localhost", "::1", "0:0:0:0:0:0:0:1"]) {
+    assert.equal(tg.isLoopbackHost(h), true, `${h} 应判为本机`);
+  }
+  // 127.0.0.256 只是「看起来像本机」，八位组越界 —— 不得放行。
+  assert.equal(tg.isLoopbackHost("127.0.0.256"), false, "127.0.0.256 不是本机地址");
+});
+
+check("私网/链路本地/CGNAT 归类正确", () => {
+  assert.equal(tg.classifyHost("10.0.0.1"), "private");
+  assert.equal(tg.classifyHost("172.16.0.1"), "private");
+  assert.equal(tg.classifyHost("172.31.255.254"), "private");
+  assert.equal(tg.classifyHost("172.32.0.1"), "public", "172.32 已出 172.16/12");
+  assert.equal(tg.classifyHost("192.168.1.1"), "private");
+  assert.equal(tg.classifyHost("169.254.1.1"), "link-local");
+  assert.equal(tg.classifyHost("100.64.0.1"), "private", "CGNAT 100.64/10");
+  assert.equal(tg.classifyHost("100.128.0.1"), "public", "100.128 已出 100.64/10");
+});
+
+check("云元数据端点一律识别（含 IPv4-mapped IPv6）", () => {
+  for (const h of ["169.254.169.254", "169.254.170.2", "100.100.100.200", "metadata.google.internal", "::ffff:169.254.169.254", "fd00:ec2::254"]) {
+    assert.equal(tg.isCloudMetadataHost(h), true, `${h} 应判为元数据端点`);
+  }
+});
+
+check("安全公网 HTTPS 跨源放行（CDN / 预签名 URL 不被一刀切）", () => {
+  const r = tg.verifyRedirectTarget("https://dav.example.com/a", "https://cdn.example.com/b");
+  assert.equal(r.ok, true, "合法跨源 HTTPS 必须放行");
+  assert.equal(r.kind, "public");
+});
+
+check("跳云元数据 → 拒绝跟随", () => {
+  const r = tg.verifyRedirectTarget("https://dav.example.com/a", "http://169.254.169.254/latest/meta-data/");
+  assert.equal(r.ok, false);
+  assert.match(r.problem, /云元数据/);
+});
+
+check("HTTPS → 非本机 HTTP 降级 → 拒绝", () => {
+  const r = tg.verifyRedirectTarget("https://dav.example.com/a", "http://plain.example.com/dest");
+  assert.equal(r.ok, false);
+  assert.match(r.problem, /明文 HTTP/);
+});
+
+check("公网起点被引导到 loopback / 私网 → 拒绝（SSRF）", () => {
+  for (const target of ["http://127.0.0.1:8080/", "http://10.0.0.5/", "http://192.168.1.9/", "http://[::1]/"]) {
+    const r = tg.verifyRedirectTarget("https://dav.example.com/a", target);
+    assert.equal(r.ok, false, `${target} 应被拒绝`);
+  }
+});
+
+check("本机起点自跳仍放行（内网自建服务不得误伤）", () => {
+  const r = tg.verifyRedirectTarget("http://127.0.0.1:8080/a", "http://127.0.0.1:9090/b");
+  assert.equal(r.ok, true, "本机自跳应放行");
+  assert.equal(r.loopback, true);
+});
+
+check("非 http(s) 协议 → 拒绝", () => {
+  const r = tg.verifyRedirectTarget("https://dav.example.com/a", "file:///etc/passwd");
+  assert.equal(r.ok, false);
+  assert.match(r.problem, /协议/);
+});
+
+section("9c. 重定向目标逐跳复验（2.2 · 端到端 defaultRequest）");
+
+await checkAsync("跳云元数据地址 → defaultRequest 抛 protocol 错，不跟随", async () => {
+  await assert.rejects(
+    () => defaultRequest("GET", `http://127.0.0.1:${port}/meta-hop`, {}),
+    (e) => e instanceof WebDavError && e.kind === "protocol" && /云元数据/.test(e.message),
+  );
+});
+
+await checkAsync("HTTPS→非本机 HTTP 降级 → defaultRequest 抛 protocol 错", async () => {
+  await assert.rejects(
+    () => defaultRequest("GET", `http://127.0.0.1:${port}/https-to-http-hop`, {}),
+    (e) => e instanceof WebDavError && e.kind === "protocol" && /明文 HTTP/.test(e.message),
+  );
+});
+
+await checkAsync("跨源合法跳转仍正常跟随（回归：加固不得误伤正常 CDN 跳转）", async () => {
+  const r = await defaultRequest("GET", `http://127.0.0.1:${port}/cross-origin-hop`, {
+    headers: { Authorization: "Basic AAA" },
+  });
+  assert.equal(r.status, 200, "本机→本机的跨源跳转是合法场景，仍应跟随");
+});
+
+// 端到端用例跑完再关监听（否则后续断言拿到 ECONNREFUSED）
 server.close();
 server2.close();
 

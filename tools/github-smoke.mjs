@@ -1112,6 +1112,18 @@ const { server, base } = await startServer((req, r) => {
     r.end();
     return;
   }
+  if (req.url === "/meta-hop") {
+    // 2.2 SSRF 靶子：云元数据端点。拦截与起点无关，故 loopback 服务端也能端到端验证。
+    r.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
+    r.end();
+    return;
+  }
+  if (req.url === "/insecure-hop") {
+    // 2.2：HTTPS → 非本机 HTTP 降级必须拒绝（明文 HTTP 只允许本机）。
+    r.writeHead(302, { location: "http://plain.example.com/x" });
+    r.end();
+    return;
+  }
   if (req.url === "/slow") {
     return; // 永不响应，触发 timeout
   }
@@ -1167,8 +1179,41 @@ await checkAsync("跨源重定向剥离 Authorization", async () => {
   hop.server.close();
 });
 
-await checkAsync("超时归一为 TimeoutError", async () => {
+// ── [10b] 重定向目标逐跳复验（2.2）─────────────────────────────────────────
+
+section("[10b] 重定向目标逐跳复验（2.2）");
+
+await checkAsync("跳云元数据地址 → 抛 protocol 错，不跟随", async () => {
   await assert.rejects(
+    () => defaultRequest("GET", `${base}/meta-hop`, {}),
+    (e) => e instanceof GitHubError && e.kind === "protocol" && /云元数据/.test(e.message)
+  );
+});
+
+await checkAsync("HTTPS→非本机 HTTP 降级 → 抛 protocol 错", async () => {
+  await assert.rejects(
+    () => defaultRequest("GET", `${base}/insecure-hop`, {}),
+    (e) => e instanceof GitHubError && e.kind === "protocol" && /明文 HTTP/.test(e.message)
+  );
+});
+
+await checkAsync("合法跨源跳转仍正常跟随（加固不误伤签名 CDN 跳转）", async () => {
+  const cdn = await startServer((req, r) => {
+    r.writeHead(200, { "content-type": "application/json" });
+    r.end(JSON.stringify({ auth: req.headers.authorization ?? "", ok: true }));
+  });
+  const hop = await startServer((req, r) => {
+    r.writeHead(302, { location: `${cdn.base}/signed` });
+    r.end();
+  });
+  const r = await defaultRequest("GET", `${hop.base}/hop`, { headers: { Authorization: "Bearer T" } });
+  assert.equal(r.status, 200, "本机→本机的跨源跳转是合法场景，仍应跟随");
+  assert.equal(JSON.parse(r.buffer.toString("utf8")).auth, "", "跨源仍须剥离 Authorization");
+  cdn.server.close();
+  hop.server.close();
+});
+
+await checkAsync("超时归一为 TimeoutError", async () => {  await assert.rejects(
     () => requestOnce("GET", `${base}/slow`, { timeoutMs: 120 }),
     (e) => e.name === "TimeoutError" && /请求超时/.test(e.message)
   );
