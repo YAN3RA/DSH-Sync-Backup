@@ -25,7 +25,7 @@
 dsh-sync-backup
 ```
 ```text
-https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.1-261011.tar.gz
+https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.2-261011.tar.gz
 ```
 ```text
 git+https://github.com/YAN3RA/DSH-Sync-Backup.git
@@ -47,7 +47,7 @@ git+https://github.com/YAN3RA/DSH-Sync-Backup.git
 
 ```sh
 dsh plugin --profile desktop add dsh-sync-backup
-dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.1-261011.tar.gz
+dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.2-261011.tar.gz
 dsh plugin --profile desktop add git+https://github.com/YAN3RA/DSH-Sync-Backup.git
 ```
 
