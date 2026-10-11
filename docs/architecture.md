@@ -81,4 +81,5 @@ back a string, and passing it through makes Save look inert.
 | `index.js` | 恢复自检用的 manifest 在**裁剪之后**重建（否则关掉 sessions 会稳定误报缺失）；自检失败置 `restoreCheckFailed` 并让该次运行判为未通过。 | `crypto-smoke` / `channels-smoke` |
 | `lib/channels.js`（报告 8.3 拆分） | 上传块是**逐字迁移**，行为零变化；两条整体失败路径（无可用通道 / 全部失败）通过 `err.channels` 把逐通道结果带回 catch —— 拆分前 `result.channels` 在抛出前已赋值，失败详情必须仍进 `state.lastChannels` 与工具输出。 | `channels-smoke` 全 19 项（跑真实 apply()）+ `smoke` 118 项 |
 | `index.js` (RPC) | `sync-backup.prune` / `sync-backup.restore-check` 整体走 `withRunLock`：备份打包期间**不允许**删产物或读半成品归档；`prune` 的状态快照在锁**外**取（锁内取会把这次 prune 自己标成 busy 回传）。`catalog-sizes` 刻意不持锁（只读源目录，持锁会让 GB 级扫描卡住备份排期）。 | `channels-smoke` [15]（hold 住 PUT 让锁被真实持有） |
+| `lib/artifacts.js` (prune) | 预览与实删**共用 `planPrune`**，两套逻辑漂移（预览 2 份、实删 3 份）比不给预览更糟；`preview: true` 路径**零删除**且不持锁。`prune` 的 `kept` 仍按**实际删完**的剩余数算，不是计划值（并发/权限失败会跳过某些文件）。 | `channels-smoke` [16]、`client-smoke` 9.9 |
 | `lib/client.js` (recovery) | 恢复码明文要过**二次确认门**才向 host 请求（报告 3.4），显示后 60 秒（`RECOVERY_TTL_MS`）自动抹掉，离开概览页即清空；明文只活在 React state，绝不落 localStorage/日志。host 侧的授权边界是已认证的注入上下文 RPC 通道本身——本插件不伪造「host 校验用户手势」的能力。 | `client-smoke` 9.7 组 |

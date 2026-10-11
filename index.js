@@ -29,7 +29,7 @@ import { promises as fs } from "node:fs";
 import { collect, isForbidden, resolveWhitelist, CATALOG } from "./lib/collect.js";
 import { buildArchive, openArchive } from "./lib/archive.js";
 import { restoreCheck, cleanupTempDir } from "./lib/restore-check.js";
-import { persist, prune, usage as artifactUsage, listArtifacts, artifactDir } from "./lib/artifacts.js";
+import { persist, prune, planPrune, usage as artifactUsage, listArtifacts, artifactDir } from "./lib/artifacts.js";
 import { loadOrCreateKey, keyStatus } from "./lib/keyring.js";
 import { encryptBytes, maskRecoveryCode } from "./lib/crypto.js";
 import { loadState, saveState, redact } from "./lib/state.js";
@@ -1017,6 +1017,20 @@ function apply(ctx, config) {
             const body = payload && typeof payload === "object" ? payload : {};
             const keepDays = Number.isFinite(body.keepDays) ? body.keepDays : config.localKeepDays;
             const keepLast = Number.isFinite(body.keepLast) ? body.keepLast : config.keepLast;
+            // 报告 5.6：destructive 操作先给预览。preview=true 时**只判定、零删除**，
+            // 且**不持锁**——它只读目录、不改任何东西，为它排队等一次备份结束没有意义。
+            // 判定与实删共用 lib/artifacts.js 的 planPrune，预览与结果不会漂移。
+            if (body.preview === true) {
+              const plan = await planPrune(dataDir, { keepDays, keepLast, now: new Date() });
+              return okv({
+                preview: true,
+                count: plan.doomed.length,
+                bytes: plan.bytes,
+                total: plan.total,
+                kept: plan.kept,
+                names: plan.doomed.map((d) => d.name),
+              });
+            }
             const done = await withRunLock("gui-prune", async () => {
               const cleaned = await prune(dataDir, { keepDays, keepLast, now: new Date() });
               return { removed: cleaned.removed, bytesFreed: cleaned.bytesFreed, kept: cleaned.kept };

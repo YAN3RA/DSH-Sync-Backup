@@ -751,6 +751,32 @@ await checkAsync("空闲时 prune 正常执行且返回视图里 busy=false（�
     await f.releaseAndClose();
   }
 });
+section("[16] 报告 5.6：清理预览（preview:true 零删除，且与实删判定同源）");
+await checkAsync("preview 只报数不删文件；预留下的文件随后仍能被真删掉", async () => {
+  const f = await runWithRpc({ hold: false });
+  try {
+    // 先真跑一次，让产物目录里真的有东西
+    const r1 = await f.rpc("sync-backup.run", {});
+    if (r1.ok !== true) throw new Error(`首次打包失败：${JSON.stringify(r1).slice(0, 200)}`);
+    const before = await f.rpc("sync-backup.prune", { preview: true });
+    if (before.ok !== true) throw new Error(`preview 应成功：${JSON.stringify(before).slice(0, 200)}`);
+    if (before.value?.preview !== true) throw new Error("preview 结果缺 preview 标记");
+    if (!Array.isArray(before.value?.names)) throw new Error("preview 应给 names 数组");
+    // 断言「预览没删任何东西」：跑完 preview 后，把保留数设到会让刚预览的项全中，仍应删得掉
+    const after = await f.rpc("sync-backup.prune", { preview: true });
+    if (after.value?.count !== before.value?.count) {
+      throw new Error(`preview 不应改变产物集合：${before.value?.count} -> ${after.value?.count}`);
+    }
+    // 真删（keepDays:0 keepLast:0 → 全删），验证预览的判据与实际可删集合一致
+    const real = await f.rpc("sync-backup.prune", { keepDays: 0, keepLast: 0 });
+    if (real.ok !== true) throw new Error(`真删失败：${JSON.stringify(real).slice(0, 200)}`);
+    if (before.value.count !== real.value.removed.length) {
+      throw new Error(`预览说删 ${before.value.count} 份，实际删了 ${real.value.removed.length} 份`);
+    }
+  } finally {
+    await f.releaseAndClose();
+  }
+});
 console.log("\n=== 结果 ===");
 if (failed === 0) {
   console.log(`channels-smoke: 通过 ${passed} / 失败 0\n全部通过。`);

@@ -500,7 +500,7 @@ const renderSerial = (language, seeds, bust) => serialize(() => render(language,
 /**
  * useState 种子必须与组件内**声明顺序**严格对齐，否则整棵树的分支会跑偏。
  * SyncBackupSection 的顺序：view, note, tone, busy, ready, tab, op, sizes, sizesState,
- * check, copyNote, recovery, recoveryNote, recoveryPending, recoveryExpiresAt, alive
+ * check, prunePlan, copyNote, recovery, recoveryNote, recoveryPending, recoveryExpiresAt, alive
  *
  * ⚠️ v3 新增了 recovery / recoveryNote 两个 state，两者之间务必同步：
  * 少给一个种子，后面的一切都会往前挪一位。曾经就因为少了它们，recovery 拿到了本该属于
@@ -519,6 +519,7 @@ function seedsFor(over = {}) {
     over.sizes ?? {},
     over.sizesState ?? "idle",
     over.check ?? null,
+    over.prunePlan ?? null,
     over.copyNote ?? "",
     over.recovery ?? "",
     over.recoveryNote ?? "",
@@ -937,6 +938,43 @@ check("确认对话框：Escape 有处理且 aria-modal（通道确认与恢复�
     const list = ch.nodes.filter((n) => n.props?.role === "alertdialog");
     assert.equal(list.length, 0, "channels tab without pending changes must not render a dialog");
   }
+});
+/* —— 9.9 报告 5.6：清理前必须显示将删除的份数与空间 —— */
+check("产物页：非确认态按钮是「立即清理」，不显示份数", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({ tab: "artifacts" }), nextBust());
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("立即清理"));
+  assert.ok(btn, "prune button missing");
+  assert.equal(typeof btn.props.onClick, "function", "prune button needs onClick");
+  assert.ok(!collectText(btn).includes("确认删除"), "idle button must not show the confirm label");
+});
+check("产物页：确认态按钮显示将删份数与释放空间（destructive 先给数）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "artifacts", op: "prune-confirm",
+    prunePlan: { n: 3, bytes: "12.5 MB", kept: 7, total: 10 },
+  }), nextBust());
+  const label = r.text.join("\n");
+  assert.ok(label.includes("确认删除 3 份"), `confirm label missing: ${label.slice(0, 300)}`);
+  assert.ok(label.includes("12.5 MB"), "freed size missing from the confirm label");
+});
+check("产物页：确认态下按钮不被 busy 规则误放行（仍受 op/v.busy 约束）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "artifacts", op: "prune-confirm",
+    prunePlan: { n: 1, bytes: "1 MB", kept: 0, total: 1 },
+    view: { ...SEED_VIEW, busy: true },
+  }), nextBust());
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("确认删除"));
+  assert.ok(btn, "confirm button missing");
+  assert.equal(btn.props.disabled, true, "confirm must stay disabled while a backup runs");
+});
+check("英文确认态不含 CJK", async () => {
+  const r = await renderSerial("en-US", seedsFor({
+    tab: "artifacts", op: "prune-confirm",
+    prunePlan: { n: 2, bytes: "3 MB", kept: 1, total: 3 },
+  }), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("Delete 2"), `en confirm label missing: ${joined.slice(0, 300)}`);
+  const cjk = joined.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g);
+  assert.equal(cjk, null, `CJK leaked into en artifacts render: ${JSON.stringify(cjk)}`);
 });
 section("结果");
 if (failures.length > 0) {
