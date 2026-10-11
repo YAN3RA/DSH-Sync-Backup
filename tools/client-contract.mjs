@@ -154,6 +154,63 @@ else {
   }
 }
 
+/* ---- 8) 安装可用性契约（报告：三种客户端都能装上） ----
+ *
+ * 这些属**打包元数据**，坏了不会有任何运行时症状 —— 插件的代码、测试、CI 可能全绿，
+ * 而用户看到的是「不认识这个包」或装完缺文件。所以在这里钉住。
+ */
+const pkgPath = path.join(root, "package.json");
+let pkg = null;
+try {
+  pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+} catch (err) {
+  fail(`package.json 读不出来：${err.message}`);
+}
+if (pkg) {
+  // 8a) private:true 会让 npm publish 直接被拒 —— 那样「用 npm 包名安装」这条路就断了。
+  if (pkg.private === true) fail("package.json 仍是 private:true，npm 包名安装不可用");
+  else pass("package.json 未标记 private（npm 包名安装可用）");
+
+  // 8b) npm registry 元数据：缺了它们包的页面与安装提示都不完整。
+  for (const k of ["name", "version", "description", "license", "repository", "main"]) {
+    if (pkg[k] === undefined || pkg[k] === "") fail(`package.json 缺 ${k}`);
+  }
+  if (pkg.repository?.url && !String(pkg.repository.url).includes("github.com")) {
+    fail(`repository.url 不是 GitHub：${pkg.repository.url}`);
+  } else if (pkg.repository?.url) {
+    pass("npm 元数据齐全（name/version/description/license/repository/main）");
+  }
+
+  // 8c) files 白名单必须覆盖**实际运行所需**的每个顶层项。
+  //     漏掉 docs/ 只是文档缺失，但漏掉 lib/ 或 cordis.patch.yml 会直接装出一个坏插件。
+  const files = Array.isArray(pkg.files) ? pkg.files : [];
+  const norm = (f) => String(f).replace(/^\/+/, "").replace(/\/+$/, "");
+  const covered = (target) => files.some((f) => norm(f) === target || norm(f) === target + "/" || norm(f).startsWith(target + "/"));
+  for (const need of ["index.js", "cordis.patch.yml", "lib", "package.json"]) {
+    // package.json 永远会被 npm 带上，无需写进 files
+    if (need === "package.json") continue;
+    if (!covered(need)) fail(`files 未覆盖 ${need}（装出来的插件会缺文件）`);
+  }
+  pass(`files 覆盖运行所需项：${files.join(", ")}`);
+
+  // 8d) bundle patch 声明必须指向真实存在的文件（缺失 = 插件静默不加载）。
+  const patchRel = pkg.dsh?.bundle?.patch;
+  if (typeof patchRel !== "string" || patchRel === "") {
+    fail("dsh.bundle.patch 未声明（bundle 插件不会被注册）");
+  } else if (!fs.existsSync(path.join(root, patchRel))) {
+    fail(`dsh.bundle.patch 指向的文件不存在：${patchRel}`);
+  } else {
+    pass(`dsh.bundle.patch = ${patchRel}（文件存在）`);
+  }
+
+  // 8e) peerDependencies 必须在 —— link: 安装靠它让 loader 拦截裸 import。
+  const peers = pkg.peerDependencies ?? {};
+  for (const need of ["@deepseek-ai/dsh-tools", "@deepseek-ai/schemastery"]) {
+    if (typeof peers[need] !== "string") fail(`peerDependencies 缺 ${need}（link 安装会静默加载失败）`);
+  }
+  pass("peerDependencies 声明完整");
+}
+
 /* ---- 7) 形态：source-as-product 的收尾 ---- */
 if (!/module\.exports = \{ inject, apply \}/.test(src)) fail("结尾缺少 module.exports = { inject, apply }");
 else pass("module.exports = { inject, apply }");

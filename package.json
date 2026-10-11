@@ -1,7 +1,6 @@
 {
   "name": "dsh-sync-backup",
-  "version": "1.1.0",
-  "private": true,
+  "version": "1.2.0",
   "type": "module",
   "description": "DSH timed backup: packs the memory layer (memory/handoff/skills/storages/sessions) that dsh-config-manager does not cover and uploads it to WebDAV + GitHub. No third-party npm dependencies; the two declared peers are provided by the harness.",
   "keywords": [
@@ -37,7 +36,9 @@
     "cordis.patch.yml",
     "lib/",
     "tools/",
+    "docs/",
     "README.md",
+    "README-详细说明.md",
     "LICENSE"
   ],
   "comment:peerDependencies": "Required by the DSH loader, not a runtime dependency. For a `link:` install the plugin is reached through a symlink, so Node resolves bare specifiers from the plugin's real on-disk location, where no harness packages exist; app-boot only intercepts a linked package when the plugin itself declares that peer (readPeerNames at lib/types/profile-resolution/resolver.js). Omitting these makes the plugin fail to load with ERR_MODULE_NOT_FOUND on @deepseek-ai/schemastery. Nothing is installed from them: the profile sets autoInstallPeers=false and the harness supplies both packages.",
@@ -76,5 +77,14 @@
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YAN3RA/DSH-Sync-Backup.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YAN3RA/DSH-Sync-Backup/issues"
+  },
+  "homepage": "https://github.com/YAN3RA/DSH-Sync-Backup#readme",
+  "license": "MIT"
 }

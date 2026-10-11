@@ -10,22 +10,54 @@
 
 ## 快速开始（安装）
 
-插件包内自带 `cordis.patch.yml`（`dsh.bundle.patch` 声明），安装后 **host 端自动注册，无需手动改 profile**。
+插件包内自带 `cordis.patch.yml`（`dsh.bundle.patch` 声明），装好后 **host 端自动注册，无需手动改 profile**。
 
-**方式一：从 GitHub 装（推荐）**
+> ⚠️ **填地址时别填网页 URL。** 插件页只接受四种 **spec**：**npm 包名** / **Git 地址** / **压缩包（tarball URL 或本地 .tgz）** / **本地绝对路径**。
+> 形如 `https://github.com/用户/仓库/tree/main` 的**网页地址不在其中**，会报
+> `无法识别这个包名或地址：a URL must point at a git repository or a tarball`。
+> 下面每种客户端都给了可直接粘贴的 spec。
 
-```sh
-dsh plugin gate github:YAN3RA/DSH-Sync-Backup   # 先做一次安全扫描
-dsh plugin --profile desktop add github:YAN3RA/DSH-Sync-Backup
-# 重启 DSH —— Host 端的插件行在加载时生效
+### 插件页（桌面版 / 网页版通用）
+
+侧栏 → **插件** → **添加插件** → 粘贴下面任意一行 → 安装 → **完全退出并重启** DSH。
+
+```text
+dsh-sync-backup
+```
+```text
+https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.1-261011.tar.gz
+```
+```text
+git+https://github.com/YAN3RA/DSH-Sync-Backup.git
 ```
 
-**方式二：本地目录装（开发用）**
+**三种 spec 怎么选：**
+
+| spec | 需要什么 | 适合谁 |
+| --- | --- | --- |
+| `dsh-sync-backup` | 已发布到 npm registry | **最省事**，装机首选 |
+| `https://.../archive/refs/tags/<tag>.tar.gz` | 能访问 GitHub | **最可靠**：纯 HTTPS 下载，不调用 `git`、不需要 SSH key，也不受代理/网络策略影响 |
+| `git+https://github.com/...` | 本机 `git` 可用且能连通 GitHub | 想跟随最新提交 |
+
+> 📌 **公司网络 / 代理环境优先用 tarball 那行。** `git+` 形式需要 pnpm 能成功 spawn `git`；某些网络策略下会直接失败，而 tarball 只走 HTTPS。
+
+> ⚠️ 别用 `github:用户/仓库` 简写——pnpm 会把它解析成 **SSH** 地址（`git+ssh://git@github.com/...`），本机没配 SSH key 时会报 `[EPERM] spawn EPERM`。
+
+### 命令行（CLI / web 版）
+
+```sh
+dsh plugin --profile desktop add dsh-sync-backup
+dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.1-261011.tar.gz
+dsh plugin --profile desktop add git+https://github.com/YAN3RA/DSH-Sync-Backup.git
+```
+
+桌面版自带 CLI 在 `<程序目录>\\resources\\runtime\\cli\\bin\\dsh.cmd`，**必须先完全退出桌面应用**再执行。
+
+### 本地目录（开发用）
 
 ```sh
 dsh plugin gate <插件目录>
 dsh plugin --profile desktop add link:<插件目录>
-# 重启 DSH
 ```
 
 > ⚠️ **不要再往 profile 的 `cordis.patch.yml` 手动 insert 本插件**：bundle patch 已自动注册，重复 insert 同一个 id 会让加载器报 duplicate loader entry id 而无法启动。

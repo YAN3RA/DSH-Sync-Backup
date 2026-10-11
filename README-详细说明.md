@@ -355,13 +355,50 @@ Host 会对工具返回值做两道校验，两者对「缺值」的处置相反
 
 ## 安装
 
+### 安装方式与 spec 格式
+
+插件页 / CLI 的 `add` 参数叫 **spec**，只接受四种写法：
+
+| spec 类型 | 例 | 说明 |
+| --- | --- | --- |
+| **npm 包名** | `dsh-sync-backup` | 最省事；走 registry |
+| **Git 地址** | `git+https://github.com/YAN3RA/DSH-Sync-Backup.git` | 需要本机 `git` 可用且能连通 |
+| **压缩包** | `https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.1-261011.tar.gz` | **最可靠**：纯 HTTPS，不 spawn `git`、无需 SSH key |
+| **本地路径** | `link:/path/to/dsh-sync-backup` | 开发用；改代码只需重启 |
+
+> ⚠️ **网页 URL 不是合法 spec**。`https://github.com/用户/仓库/tree/main` 这种网页地址会被拒：
+> `无法识别这个包名或地址：a URL must point at a git repository or a tarball`。
+> 要「从 GitHub 装」就用上面的 **tarball** 或 **git+https** 形式。
+
+> ⚠️ **别用 `github:用户/仓库` 简写**：pnpm 会把它解析为 SSH 地址 `git+ssh://git@github.com/...`，
+> 本机无 SSH key 时报 `[EPERM] spawn EPERM`。
+
+### 三种客户端
+
+| 客户端 | 入口 | 备注 |
+| --- | --- | --- |
+| **桌面版**（官方 0.2.0-rc.2） | 侧栏「插件」→ 添加插件；或自带 CLI | profile 固定为 `desktop`，数据根 `~/.dsh` |
+| **网页版 / CLI** | `dsh plugin --profile <profile> add <spec>` | 与桌面版同一套 spec |
+| **本地 link** | `dsh plugin --profile desktop add link:<目录>` | 需声明 peerDependencies（见下） |
+
+桌面版自带 CLI：`<程序目录>\resources\runtime\cli\bin\dsh.cmd`，**必须先完全退出桌面应用**。
+
 ### 标准安装
 
 ```sh
-dsh plugin gate <插件目录或 github:owner/repo>    # 安装前安全扫描
-dsh plugin --profile desktop add <插件目录或包地址>
-# 重启 DSH
+dsh plugin gate <插件目录或包地址>              # 安装前安全扫描（可选但推荐）
+dsh plugin --profile desktop add dsh-sync-backup
+# 或（不依赖 git / registry）
+dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.1-261011.tar.gz
+# 完全退出并重启 DSH
 ```
+
+### 装完不生效
+
+- **必须完全退出并重启** DSH 才加载新的 JS 模块（只刷新浏览器不够）；
+- 确认包名进了 profile：`~/.dsh/profiles/desktop/package.json` 的 `bundles`；
+- 插件加载失败是**静默的**（stderr 只在 64 KB 内存环形缓冲，不落盘）；
+- **升级要「先卸载再装新版」**（不支持自动更新）。
 
 **link 安装的沙箱坑**：`link:` 安装会写 `$DSH_HOME/profiles/<profile>/`，在工作区沙箱下可能报 `EPERM ... package.json.lock`——那是**沙箱拒绝**，不是文件锁。
 
