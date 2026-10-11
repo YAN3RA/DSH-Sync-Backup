@@ -25,7 +25,7 @@
 dsh-sync-backup
 ```
 ```text
-https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.2-261011.tar.gz
+https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.3-261011.tar.gz
 ```
 ```text
 git+https://github.com/YAN3RA/DSH-Sync-Backup.git
@@ -47,7 +47,7 @@ git+https://github.com/YAN3RA/DSH-Sync-Backup.git
 
 ```sh
 dsh plugin --profile desktop add dsh-sync-backup
-dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.2-261011.tar.gz
+dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.3-261011.tar.gz
 dsh plugin --profile desktop add git+https://github.com/YAN3RA/DSH-Sync-Backup.git
 ```
 
@@ -252,14 +252,14 @@ DSH 的记忆散在 `~/.dsh` 里：全局人格 `AGENTS.md`、长期记忆 `memo
 | 示例 | 含义 |
 | --- | --- |
 | `V1.0-261008` | 初版（V1.0），2026-10-08 推送 |
-| `V1.1-261115` | 第 1 次迭代，2026-11-15 推送 |
-| `V1.2-261203` | 第 2 次迭代，2026-12-03 推送 |
+| `V1.2-261011` | 第 2 次迭代，2026-10-11 推送 |
+| `V1.3-261011` | 第 3 次迭代，2026-10-11 推送 |
 
 - **主版本号**（`V1`）：重大架构变化时递增；
 - **次版本号**（`.0` / `.1` / `.2`）：**每次迭代十进制递增**；
 - **日期**（`261008`）：该次发布的**推送日期**（`YYMMDD`）。
 
-`package.json` 的 `version` 保持 npm 合法的 semver 形式（`V1.2-261203` ↔ `1.2.0`），日期只体现在 **git tag** 与 Release 上。
+`package.json` 的 `version` 保持 npm 合法的 semver 形式（`V1.3-261011` ↔ `1.3.0`），日期只体现在 **git tag** 与 Release 上。
 
 **发版流程（开发者）**：
 
@@ -268,8 +268,8 @@ DSH 的记忆散在 `~/.dsh` 里：全局人格 `AGENTS.md`、长期记忆 `memo
 git push origin main
 
 # 2. 打 annotated tag 并推送
-git tag -a V1.1-261115 -m "发布说明：……"
-git push origin V1.1-261115
+git tag -a V1.3-261011 -m "发布说明：……"
+git push origin V1.3-261011
 
 # 3. 在 GitHub 建 Release，上传按版本打包的 zip 作为 Asset
 ```

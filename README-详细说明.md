@@ -367,7 +367,7 @@ Host 会对工具返回值做两道校验，两者对「缺值」的处置相反
 | --- | --- | --- |
 | **npm 包名** | `dsh-sync-backup` | 最省事；走 registry |
 | **Git 地址** | `git+https://github.com/YAN3RA/DSH-Sync-Backup.git` | 需要本机 `git` 可用且能连通 |
-| **压缩包** | `https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.2-261011.tar.gz` | **最可靠**：纯 HTTPS，不 spawn `git`、无需 SSH key |
+| **压缩包** | `https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.3-261011.tar.gz` | **最可靠**：纯 HTTPS，不 spawn `git`、无需 SSH key |
 | **本地路径** | `link:/path/to/dsh-sync-backup` | 开发用；改代码只需重启 |
 
 > ⚠️ **网页 URL 不是合法 spec**。`https://github.com/用户/仓库/tree/main` 这种网页地址会被拒：
@@ -393,7 +393,7 @@ Host 会对工具返回值做两道校验，两者对「缺值」的处置相反
 dsh plugin gate <插件目录或包地址>              # 安装前安全扫描（可选但推荐）
 dsh plugin --profile desktop add dsh-sync-backup
 # 或（不依赖 git / registry）
-dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.2-261011.tar.gz
+dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.3-261011.tar.gz
 # 完全退出并重启 DSH
 ```
 
@@ -513,12 +513,12 @@ node tools/set-github-token.mjs --from-env --verify
 | 示例 | 含义 |
 | --- | --- |
 | `V1.0-261008` | 初版，2026-10-08 推送 |
-| `V1.1-261115` | 第 1 次迭代 |
-| `V1.2-261203` | 第 2 次迭代 |
+| `V1.2-261011` | 第 2 次迭代，2026-10-11 推送 |
+| `V1.3-261011` | 第 3 次迭代，2026-10-11 推送 |
 
 - 主版本号重大架构变化时递增；次版本号**每次迭代十进制递增**；日期为该次发布的推送日期。
-- `package.json` 的 `version` 保持 npm 合法 semver（`1.2.0` 对应 `V1.2-<date>`），日期只体现在 **git tag 与 Release** 上。
-- Release 的 Assets 提供该版本的插件目录 zip：`dsh-sync-backup-V1.0-261008.zip`。
+- `package.json` 的 `version` 保持 npm 合法 semver（`1.3.0` 对应 `V1.3-<date>`），日期只体现在 **git tag 与 Release** 上。
+- Release 的 Assets 提供该版本的插件目录 zip：`dsh-sync-backup-V1.3-261011.zip`。
 
 ---
 
