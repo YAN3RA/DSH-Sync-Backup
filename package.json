@@ -21,6 +21,7 @@
     "./lib/state.js": "./lib/state.js",
     "./lib/scheduler.js": "./lib/scheduler.js",
     "./lib/webdav.js": "./lib/webdav.js",
+    "./lib/channels.js": "./lib/channels.js",
     "./lib/github.js": "./lib/github.js",
     "./lib/creds.js": "./lib/creds.js",
     "./lib/artifacts.js": "./lib/artifacts.js",

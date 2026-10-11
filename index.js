@@ -24,7 +24,6 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 
 import path from "node:path";
 import os from "node:os";
-import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 
 import { collect, isForbidden, resolveWhitelist, CATALOG } from "./lib/collect.js";
@@ -34,10 +33,10 @@ import { persist, prune, usage as artifactUsage, listArtifacts, artifactDir } fr
 import { loadOrCreateKey, keyStatus } from "./lib/keyring.js";
 import { encryptBytes, maskRecoveryCode } from "./lib/crypto.js";
 import { loadState, saveState, redact } from "./lib/state.js";
-import { loadUserConfig, saveUserConfig, mergeConfig, pickEditable, sanitizeEditable } from "./lib/user-config.js";
-import { WebDavClient, WebDavError } from "./lib/webdav.js";
-import { GitHubClient, GitHubError } from "./lib/github.js";
-import { resolveCredential, resolveWebdavTarget } from "./lib/creds.js";
+import { loadUserConfig, saveUserConfig, mergeConfig, sanitizeEditable } from "./lib/user-config.js";
+import { WebDavError } from "./lib/webdav.js";
+import { GitHubError } from "./lib/github.js";
+import { createChannels, archiveId, WEBDAV_REF, GITHUB_REF } from "./lib/channels.js";
 import { BackupScheduler } from "./lib/scheduler.js";
 
 /** Cordis 插件名；必须与 cordis.patch.yml 的 `- id:` 逐字一致。 */
@@ -45,16 +44,6 @@ const name = "sync-backup";
 
 /** 需要解析的服务（Host 面）。只需要工具注册，故仅 tools。 */
 const inject = ["tools"];
-
-/**
- * 本插件自己的 WebDAV 口令槽位。
- * **不使用** config-manager 的槽位（DSH_CONFIG_MANAGER_SYNC_WEBDAV_PASSWORD）——
- * 借别人的专用密码会让本插件的可用性绑在另一个插件的配置上，失败时也难以归因。
- */
-const WEBDAV_REF = "DSH_SYNC_BACKUP_WEBDAV_PASSWORD";
-
-/** GitHub PAT 槽位（P3 新槽位；无历史槽位可回退，缺失即跳过该通道）。 */
-const GITHUB_REF = "DSH_SYNC_BACKUP_GITHUB_TOKEN";
 
 /**
  * 当前 dsh 运行时版本。用于归档的「版本 compatible」标记与恢复自检比对。
@@ -279,177 +268,12 @@ function apply(ctx, config) {
   // 失败已在 reloadEffective 里吞掉，不会 unhandled。
   const effectiveReady = reloadEffective();
 
-  /**
-   * 解析 WebDAV 口令 —— **只读本插件自己的槽位**（需求③）。
-   *
-   * 这里刻意**不再回退** config-manager 的 `DSH_CONFIG_MANAGER_SYNC_WEBDAV_PASSWORD`：
-   * 那个槽位是另一个插件录入的专用密码，借用它意味着本插件的存在依赖于别人的配置，
-   * 一旦对方改了密码或卸载，本插件会以一种很难归因的方式失败。
-   * 代价是用户要在本插件里录一次专用密码（见 `tools/set-webdav-password.mjs`）。
-   *
-   * 返回值只用于构造认证头，**永不记录、永不下发给 GUI**。
+  /*
+   * 双通道上传与凭据解析已拆到 lib/channels.js（报告 8.3）。
+   * 工厂只依赖 ctx/home/config 三样：config 传的是下面那个**就地合并**的活对象引用，
+   * 所以 reloadEffective 之后读到的永远是最新值 —— 与拆分前完全一致。
    */
-  async function webdavPassword() {
-    const refs = [];
-    if (config.webdavCredentialRef) refs.push(config.webdavCredentialRef);
-    refs.push(WEBDAV_REF);
-    for (const ref of refs) {
-      const got = await resolveCredential(ctx, home, ref);
-      if (got) return { value: got.value, ref, source: got.source };
-    }
-    return undefined;
-  }
-
-  /**
-   * 上传一份归档（内容对象全部写完后**索引最后写**；索引写成功后才 best-effort 删旧快照，见 lib/webdav.js 的顺序契约）。
-   * 归档 id 形如 `20261008-201530-ab12cd34`（本地时间 + 随机后缀，天然按时间排序）。
-   */
-  async function uploadArchive({ gz, manifest, id }) {
-    const pwdInfo = await webdavPassword();
-    if (!pwdInfo) {
-      throw new Error(
-        `未找到 WebDAV 口令：凭据引用 ${config.webdavCredentialRef || WEBDAV_REF} 未配置。` +
-          "（本插件不复用 config-manager 的槽位，需用 tools/set-webdav-password.mjs 录一次专用密码）",
-      );
-    }
-    const target = await resolveWebdavTarget(home, {
-      url: config.webdavUrl,
-      username: config.webdavUsername,
-    });
-    if (!target) {
-      throw new Error(
-        "未找到 WebDAV 目标：请在插件配置里填 webdavUrl 与 webdavUsername（推荐），" +
-          "或确保 $DSH_HOME/dsh-config-manager/sync/sync-config.json 里有 webdav.url / webdav.username。",
-      );
-    }
-
-    const client = new WebDavClient({
-      baseUrl: target.url,
-      username: target.username,
-      getPassword: async () => pwdInfo.value,
-      timeoutMs: config.webdavTimeoutMs,
-      // 显式配置才放行「非本机 + http」；否则只允许 https 或本机
-      allowInsecureHttp: config.webdavAllowInsecureHttp === true,
-    });
-
-    const now = new Date();
-    const archiveSha256 = createHash("sha256").update(gz).digest("hex");
-    const out = await client.uploadSnapshot({
-      dir: config.webdavPath,
-      id,
-      archive: gz,
-      manifest: {
-        schemaVersion: 1,
-        plugin: "dsh-sync-backup",
-        id,
-        createdAt: now.toISOString(),
-        fileCount: manifest.fileCount,
-        totalBytes: manifest.totalBytes ?? null,
-        archiveBytes: gz.length,
-        archiveSha256,
-      },
-      keepLast: config.keepLast,
-    });
-
-    return {
-      id,
-      sha256: archiveSha256,
-      ...out,
-      client,
-      credentialRef: pwdInfo.ref,
-      credentialSource: pwdInfo.source,
-    };
-  }
-
-  /**
-   * 回读校验：GET 刚上传的归档，比对字节长度与 SHA256。
-   * 只有这一步过了才算「上传成功」——PUT 返回 2xx 不等于落盘正确。
-   */
-  async function verifyRemote({ client, archiveUrl, expected }) {
-    const got = await client.get(archiveUrl);
-    if (got.missing) throw new Error("回读失败：远端对象不存在（404）");
-    const bytes = got.buffer;
-    const sha = createHash("sha256").update(bytes).digest("hex");
-    return {
-      bytes: bytes.length,
-      sha256: sha,
-      lengthOk: bytes.length === expected.length,
-      shaOk: sha === expected.sha256,
-    };
-  }
-
-  /* ---------------- GitHub 通道 ---------------- */
-
-  /** 解析 GitHub PAT（本插件槽位优先；无回退槽位）。 */
-  async function githubToken() {
-    const refs = [];
-    if (config.githubCredentialRef) refs.push(config.githubCredentialRef);
-    refs.push(GITHUB_REF);
-    for (const ref of refs) {
-      const got = await resolveCredential(ctx, home, ref);
-      if (got) return { value: got.value, ref, source: got.source };
-    }
-    return undefined;
-  }
-
-  /** 归档 id：本地时间 `YYYYMMDD-HHMMSS` + 8 位随机 hex（天然按时间排序）。 */
-  function archiveId(now) {
-    const pad = (n) => String(n).padStart(2, "0");
-    const stamp =
-      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
-      `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    return `${stamp}-${randomBytes(4).toString("hex")}`;
-  }
-
-  /**
-   * 上传一份归档到 GitHub 私有仓库（contents API，内容对象写完后**索引最后写**；索引写成功后才删旧快照）。
-   * 与 WebDAV 通道使用**同一份载荷**，故 id 由调用方传入以保持两通道一致。
-   */
-  async function uploadGitHubArchive({ gz, manifest, id, tokenInfo }) {
-    const client = new GitHubClient({
-      repo: config.githubRepo,
-      branch: config.githubBranch || undefined,
-      apiBaseUrl: config.githubApiBaseUrl || undefined,
-      getToken: async () => tokenInfo.value,
-      timeoutMs: config.githubTimeoutMs,
-      allowInsecureHttp: config.githubAllowInsecureHttp === true,
-    });
-
-    const archiveSha256 = createHash("sha256").update(gz).digest("hex");
-    const out = await client.uploadSnapshot({
-      dir: config.githubPath,
-      id,
-      archive: gz,
-      manifest: {
-        schemaVersion: 1,
-        plugin: "dsh-sync-backup",
-        id,
-        createdAt: new Date().toISOString(),
-        fileCount: manifest.fileCount,
-        totalBytes: manifest.totalBytes ?? null,
-        archiveBytes: gz.length,
-        archiveSha256,
-      },
-      keepLast: config.keepLast,
-      writeLatest: config.githubWriteLatest,
-    });
-
-    return { id, sha256: archiveSha256, ...out, client, credentialRef: tokenInfo.ref, credentialSource: tokenInfo.source };
-  }
-
-  /** 回读校验 GitHub 通道：GET 刚上传的归档，比对字节长度与 SHA256。 */
-  async function verifyGithubRemote({ client, archivePath, expected }) {
-    const got = await client.readFile(archivePath);
-    if (got.missing) throw new Error("回读失败：远端对象不存在（404）");
-    const bytes = got.buffer;
-    const sha = createHash("sha256").update(bytes).digest("hex");
-    return {
-      bytes: bytes.length,
-      sha256: sha,
-      lengthOk: bytes.length === expected.length,
-      shaOk: sha === expected.sha256,
-    };
-  }
+  const chans = createChannels({ ctx, home, config });
 
   /* ---------------- 单次运行互斥（single-flight） ---------------- */
 
@@ -630,136 +454,27 @@ function apply(ctx, config) {
       result.durationMs = Date.now() - startedAt;
 
       // 5) 上传通道（可选，显式请求才走）。两通道共用同一份载荷与同一个 id。
+      //
+      // 双通道上传与结果聚合已拆到 lib/channels.js（报告 8.3），语义与原实现逐字一致：
+      // 单通道失败只落进 channels.<key>，而「没有任何可用通道」与「全部通道失败」仍然抛出，
+      // 由下面的统一 catch 收尾。
       if (upload) {
         const id = archiveId(new Date());
-        const channels = {};
-
-        // ---- WebDAV ----
-        if (config.webdavEnabled) {
-          try {
-            const up = await uploadArchive({ gz, manifest: finalManifest, id });
-            const verify = await verifyRemote({
-              client: up.client,
-              archiveUrl: up.archiveUrl,
-              expected: { length: gz.length, sha256: up.sha256 },
-            });
-            if (!verify.shaOk) {
-              throw new WebDavError(
-                `回读校验失败：远端 SHA256 ${verify.sha256.slice(0, 16)}… ≠ 本地 ${up.sha256.slice(0, 16)}…（长度 ${verify.bytes} vs ${gz.length}）`,
-                { kind: "protocol" },
-              );
-            }
-            channels.webdav = {
-              ok: true,
-              id,
-              archiveUrl: up.archiveUrl,
-              indexUrl: up.indexUrl,
-              sha256: verify.sha256,
-              remoteBytes: verify.bytes,
-              pruned: up.pruned,
-              credentialRef: up.credentialRef,
-              credentialSource: up.credentialSource,
-              kept: up.index.entries.length,
-            };
-          } catch (err) {
-            // 「键缺席」而非 undefined：channels 会原样回传工具返回值，
-            // 而 dsh-tools 的两道门只接受 JSON 可无损表达的值（见 tools/host-gates.mjs）。
-            channels.webdav = {
-              ok: false,
-              error: redact(err && err.message ? err.message : String(err)),
-              ...(err instanceof WebDavError ? { errorKind: err.kind, retryable: err.retryable === true } : {}),
-            };
-          }
-        }
-
-        // ---- GitHub（关闭开关 / 未配置仓库 → 跳过，不算失败）----
-        if (!config.githubEnabled || !config.githubRepo) {
-          channels.github = {
-            ok: false,
-            skipped: true,
-            error: !config.githubEnabled ? "GitHub 通道已关闭（githubEnabled=false）" : "未配置 githubRepo",
-          };
-        } else {
-          const tokenInfo = await githubToken();
-          if (!tokenInfo) {
-            channels.github = {
-              ok: false,
-              skipped: true,
-              error: `未找到 GitHub 凭据：槽位 ${config.githubCredentialRef || GITHUB_REF} 未配置`,
-            };
-          } else {
-            try {
-              const up = await uploadGitHubArchive({ gz, manifest: finalManifest, id, tokenInfo });
-              const verify = await verifyGithubRemote({
-                client: up.client,
-                archivePath: up.archivePath,
-                expected: { length: gz.length, sha256: up.sha256 },
-              });
-              if (!verify.shaOk) {
-                throw new GitHubError(
-                  `回读校验失败：远端 SHA256 ${verify.sha256.slice(0, 16)}… ≠ 本地 ${up.sha256.slice(0, 16)}…（长度 ${verify.bytes} vs ${gz.length}）`,
-                  { kind: "protocol" },
-                );
-              }
-              channels.github = {
-                ok: true,
-                id,
-                repo: up.repo,
-                branch: up.branch,
-                archivePath: up.archivePath,
-                indexPath: up.indexPath,
-                latestPath: up.latestPath,
-                archiveUrl: up.archiveUrl,
-                sha256: verify.sha256,
-                remoteBytes: verify.bytes,
-                pruned: up.pruned,
-                credentialRef: up.credentialRef,
-                credentialSource: up.credentialSource,
-                kept: up.index.entries.length,
-              };
-            } catch (err) {
-              channels.github = {
-                ok: false,
-                error: redact(err && err.message ? err.message : String(err)),
-                ...(err instanceof GitHubError ? { errorKind: err.kind, retryable: err.retryable === true } : {}),
-              };
-            }
-          }
-        }
-
-        // ---- 汇总：全成功 / 半成功（partial）/ 全失败 ----
-        const attempted = Object.values(channels).filter((c) => c && c.skipped !== true);
-        const okCount = attempted.filter((c) => c.ok).length;
-        result.upload = okCount > 0;
-        result.channels = channels;
-        if (channels.webdav) result.remote = channels.webdav.ok ? channels.webdav : undefined;
-
-        if (attempted.length === 0) {
-          throw new Error("没有任何可用的上传通道：请把 webdavEnabled 或 githubEnabled 打开，并填好对应目标。");
-        }
-        if (okCount === 0) {
-          const first = attempted.find((c) => !c.ok);
-          const e = new Error(`全部上传通道失败：${first ? first.error : "未知错误"}`);
-          e.partial = false;
-          throw e;
-        }
-        result.partial = okCount < attempted.length;
-        if (result.partial) {
-          const failed = [];
-          if (channels.webdav && channels.webdav.skipped !== true && !channels.webdav.ok) {
-            failed.push(`WebDAV: ${channels.webdav.error}`);
-          }
-          if (channels.github && channels.github.skipped !== true && !channels.github.ok) {
-            failed.push(`GitHub: ${channels.github.error}`);
-          }
-          result.partialReason = failed.join("；");
-        }
+        const up = await chans.uploadBoth({ gz, manifest: finalManifest, id });
+        result.upload = up.upload;
+        result.channels = up.channels;
+        if (up.channels.webdav) result.remote = up.channels.webdav.ok ? up.channels.webdav : undefined;
+        result.partial = up.partial === true;
+        if (up.partialReason !== undefined) result.partialReason = up.partialReason;
         result.durationMs = Date.now() - startedAt;
       }
     } catch (err) {
       result.ok = false;
       result.error = redact(err && err.message ? err.message : String(err));
       if (err instanceof WebDavError || err instanceof GitHubError) result.errorKind = err.kind;
+      // 上传通道的整体失败：把 channels.js 附在错误上的逐通道结果读回，
+      // 让失败详情仍进 state.lastChannels 与工具输出（与拆分前一致）。
+      if (err && err.channels) result.channels = err.channels;
       result.durationMs = Date.now() - startedAt;
     }
 
@@ -934,13 +649,10 @@ function apply(ctx, config) {
 
     // 数据去向：解析后的最终目标（含 config-manager 回退）与凭据是否就绪。
     // 这两个查询都是只读的，失败一律降级为「未知」而不是让状态页挂掉。
-    const webdavTarget = await resolveWebdavTarget(home, {
-      url: config.webdavUrl,
-      username: config.webdavUsername,
-    }).catch(() => undefined);
+    const webdavTarget = await chans.resolveWebdav().catch(() => undefined);
     // 注意：webdavPassword() 找不到口令时返回 undefined 而**不抛错**，
     // 所以这里必须看返回值，不能只看有没有 reject。
-    const webdavCredentialConfigured = (await webdavPassword().catch(() => undefined)) !== undefined;
+    const webdavCredentialConfigured = (await chans.webdavPassword().catch(() => undefined)) !== undefined;
 
     const lines = [
       `插件: ${st.pluginLoaded ? "已加载" : "未运行过"}`,
