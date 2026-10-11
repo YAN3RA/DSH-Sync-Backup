@@ -1,6 +1,6 @@
 {
   "name": "dsh-sync-backup",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "DSH timed backup: packs the memory layer (memory/handoff/skills/storages/sessions) that dsh-config-manager does not cover and uploads it to WebDAV + GitHub. No third-party npm dependencies; the two declared peers are provided by the harness.",
