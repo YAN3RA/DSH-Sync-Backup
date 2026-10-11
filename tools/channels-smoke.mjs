@@ -26,6 +26,34 @@ import { promises as fs } from "node:fs";
 
 import * as plugin from "../index.js";
 
+/**
+ * 宿主凭据服务的内存替身（同 @deepseek-ai/dsh-credentials-local 的 record-half）。
+ *
+ * ⚠️ 每个 home 只能有**一个**实例：本机 KEK 就存在这份 Map 里，若 get() 每次
+ * 都新建一个，「取 KEK → 写 KEK → 再读 KEK」就会看到空库，用例会误报
+ * 「本机 KEK 写入后仍读不到」。所以按 home 缓存。
+ */
+const credentialsStubs = new Map();
+function makeCredentialsStub(home) {
+  const key = String(home ?? "(default)");
+  let stub = credentialsStubs.get(key);
+  if (stub) return stub;
+  const records = new Map();
+  stub = {
+    records,
+    async readRecord(k) { return records.get(String(k)); },
+    async modifyRecord(k, mutate) {
+      const cur = records.get(String(k));
+      const next = await mutate(cur);
+      if (next === undefined) return cur;
+      records.set(String(k), next);
+      return next;
+    },
+  };
+  credentialsStubs.set(key, stub);
+  return stub;
+}
+
 let passed = 0;
 let failed = 0;
 const failures = [];
@@ -412,7 +440,9 @@ async function runOnce(opts = {}) {
   const ctx = {
     tools: { register: (d) => registered.push(d) },
     systemPrompt: systemPromptStub,
-    get: (name) => (name === "systemPrompt" ? systemPromptStub : undefined),
+    // 宿主凭据服务替身：v4 信封加密的本机 KEK 由它保管（key = dsh-sync-backup/local-kek）。
+    // 缺了它，apply() 的密钥路径会（正确地）fail closed，用例会全线报「凭据服务不可用」。
+    get: (name) => (name === "systemPrompt" ? systemPromptStub : (name === "credentials" ? makeCredentialsStub(home) : undefined)),
     inject: () => () => {},
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     effect: (fn) => fn(),
@@ -499,7 +529,7 @@ async function runWithRpc(opts = {}) {
   const ctx = {
     tools: { register: (d) => registered.push(d) },
     systemPrompt: { section: () => () => {} },
-    get: (name) => (name === "systemPrompt" ? ctx.systemPrompt : undefined),
+    get: (name) => (name === "systemPrompt" ? ctx.systemPrompt : (name === "credentials" ? makeCredentialsStub(home) : undefined)),
     // 同步回调 mountRpc（真实 webCtx 就绪时就是同步注入），借此捕获 dispatch
     inject: (_deps, cb) => { cb({ connection, webServer: {}, effect: (fn) => fn() }); return () => {}; },
     logger: { info: () => {}, warn: () => {}, error: () => {} },

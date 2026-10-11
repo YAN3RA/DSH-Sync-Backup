@@ -71,7 +71,7 @@ back a string, and passing it through makes Save look inert.
 
 | 位置 | 不变量 | 回归测试 |
 | --- | --- | --- |
-| `lib/keyring.js` | **只有 `ENOENT` 才生成新密钥**；文件存在但损坏/无权限一律抛 `KeyError` 并保留原文件。状态页走只读 `keyStatus()`，不产生写副作用。 | `crypto-smoke` 的「损坏的 key 抛错，且原文件一个字节都不动」等 8 条 |
+| `lib/keyring.js` | **只有 `ENOENT` 才生成新密钥**；文件存在但损坏/无权限一律抛 `KeyError` 并保留原文件。状态页走只读 `keyStatus()`，不产生写副作用。**v4 信封加密**：DEK 只以密文落盘，由两把 KEK 分别包裹（`wrappedLocal` 走宿主凭据库 `dsh-sync-backup/local-kek`，`wrappedRecovery` 走恢复码经 HKDF 派生的 KEK）；两份包裹用**不同 AAD** 绑定用途，互换即认证失败；本机 KEK 丢失 = `locked`（不是 `invalid`，且**绝不**生成新 KEK）；v3 明文密钥自动迁移且 **DEK 不变**（既有归档无需重新加密），迁移会更换恢复码。 | `crypto-smoke` [3] 组 23 条（迁移/篡改/AAD 互换/未知版本/KEK 丢失/宿主 API 语义） |
 | `lib/archive.js` | `parseTar` 严格校验 `size`（八进制/安全整数/数据与 padding 越界）、拒绝重复路径、限制条目数与解压总量；`openArchive` 给 `gunzipSync` 设 `maxOutputLength` 挡 gzip bomb。 | `security-smoke` 的 1.2 组 |
 | `lib/restore-check.js` | 解包前校验每条路径；写盘前按**解析后的绝对路径**确认仍在临时根目录内；临时目录由自身 `try/finally` 兜底清理。 | `security-smoke` 的 1.2 组 |
 | `lib/collect.js` | 白名单单文件用 `lstat` 拒绝链接；`readEntries` 复核 `realpath`，堵住路径**中段**是链接（如 junction）时的越界读取。 | `security-smoke` 的 1.3 组 |

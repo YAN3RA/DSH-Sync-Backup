@@ -30,7 +30,7 @@ import { collect, isForbidden, resolveWhitelist, CATALOG } from "./lib/collect.j
 import { buildArchive, openArchive } from "./lib/archive.js";
 import { restoreCheck, cleanupTempDir } from "./lib/restore-check.js";
 import { persist, prune, planPrune, usage as artifactUsage, listArtifacts, artifactDir } from "./lib/artifacts.js";
-import { loadOrCreateKey, keyStatus } from "./lib/keyring.js";
+import { loadOrCreateKey, keyStatus, hostKekStore, LOCAL_KEK_KEY } from "./lib/keyring.js";
 import { encryptBytes, maskRecoveryCode } from "./lib/crypto.js";
 import { loadState, saveState, redact } from "./lib/state.js";
 import { loadUserConfig, saveUserConfig, mergeConfig, sanitizeEditable } from "./lib/user-config.js";
@@ -241,6 +241,16 @@ function apply(ctx, config) {
   const home = resolveHome(config);
   const dataDir = path.join(home, config.dataDir);
 
+  /**
+   * 本机 KEK 存储（信封加密的「本机」那一层）。
+   *
+   * 走 DSH 官方凭据服务的 record-half，record key 固定为 `dsh-sync-backup/local-kek`。
+   * 每次调用现取服务，因为 `credentials` 可能在插件加载后才挂载；服务缺失时
+   * `hostKekStore` 会在真正读写那一刻抛 KeyError（fail closed），**不会**退化成
+   * 「没有本机层」——契约要求本机 KEK 必须是真秘密。
+   */
+  const kek = hostKekStore(ctx);
+
   // ---- v3：用户配置（$DSH_HOME/<dataDir>/config.json）优先于 patch ----
   //
   // patch 里的值是**出厂默认**，用户在设置页点出来的值写进自己的 config.json。
@@ -386,7 +396,8 @@ function apply(ctx, config) {
         throw new Error(`解包回验缺失 ${missing.length} 个条目：${missing.slice(0, 3).join(", ")}`);
       }
 
-      const { key, created: keyCreated } = await loadOrCreateKey(dataDir);
+      const keyInfo = await loadOrCreateKey(dataDir, { kek });
+      const { key, created: keyCreated } = keyInfo;
       const gz = encryptBytes(key, plainGz);
 
       result.ok = true;
@@ -460,7 +471,15 @@ function apply(ctx, config) {
       // 由下面的统一 catch 收尾。
       if (upload) {
         const id = archiveId(new Date());
-        const up = await chans.uploadBoth({ gz, manifest: finalManifest, id });
+        // 契约「恢复元数据可迁移」：把只含密文的 recoveryEnvelope 随 manifest 一起上行，
+        // 换机器 / 重装后仅凭用户保管的恢复码即可把 DEK 接回来。它不含恢复码、
+        // 明文 DEK 或本机 KEK，也不含本机专用的 wrappedLocal。
+        const up = await chans.uploadBoth({
+          gz,
+          manifest: finalManifest,
+          id,
+          recoveryEnvelope: keyInfo.recoveryEnvelope ?? null,
+        });
         result.upload = up.upload;
         result.channels = up.channels;
         if (up.channels.webdav) result.remote = up.channels.webdav.ok ? up.channels.webdav : undefined;
@@ -629,7 +648,7 @@ function apply(ctx, config) {
     // 在密钥尚不存在时会顺手生成一把并写盘。那既是意外的写副作用，也让
     // 「第一次备份时才生成密钥」这条设计变得不成立。改走 keyStatus：
     // 只报告存在/缺失/损坏，绝不创建、绝不改写。
-    const kst = await keyStatus(dataDir).catch(() => ({ status: "unreadable" }));
+    const kst = await keyStatus(dataDir, { kek }).catch(() => ({ status: "unreadable" }));
     const keyState = {
       status: kst.status, // ok | missing | invalid | unreadable
       detail: kst.detail ?? null,
@@ -641,7 +660,7 @@ function apply(ctx, config) {
     if (kst.status === "ok") {
       // 只有密钥确实可用时才去读它——读失败（比如恰好被删）也不影响状态页
       try {
-        recovery = await loadOrCreateKey(dataDir);
+        recovery = await loadOrCreateKey(dataDir, { kek });
       } catch {
         recovery = { recoveryCode: "", created: false };
       }
@@ -667,7 +686,7 @@ function apply(ctx, config) {
       `定时器: ${config.schedulerEnabled ? (config.enabled ? "已启用" : "已停用（enabled=false）") : "已关闭"}；定时上传=${config.uploadOnSchedule === true && config.dryRun !== true ? "开" : "关（仅本地打包）"}`,
       `下次计划运行: ${scheduler?.nextRunAt ? scheduler.nextRunAt.toISOString() : "未排期"}`,
       `包含 sessions=${config.includeSessions}，semantic=${config.includeSemantic}`,
-      `加密: 开启（AES-256-GCM，密钥随插件数据目录存放）；恢复码 ${recovery.recoveryCode ? `${maskRecoveryCode(recovery.recoveryCode)}…` : "不可用"}`,
+      `加密: 开启（AES-256-GCM + DEK 双包裹信封）；本机 KEK 由宿主凭据库保管（${LOCAL_KEK_KEY}）；恢复码 ${recovery.recoveryCode ? `${maskRecoveryCode(recovery.recoveryCode)}…` : keyState.status === "ok" ? "不可重算（只在生成/迁移时展示过一次）" : "不可用"}`,
       `WebDAV: ${config.webdavEnabled ? config.webdavPath : "已禁用（不与任何外部服务通信）"}（口令引用 ${config.webdavCredentialRef || WEBDAV_REF}）`,
       `GitHub: ${config.githubEnabled && config.githubRepo ? `${config.githubRepo} / ${config.githubPath}` : "未启用"}（凭据引用 ${config.githubCredentialRef || GITHUB_REF}）`,
       userOverrideCount > 0
@@ -1066,7 +1085,7 @@ function apply(ctx, config) {
               }
               let check;
               // 本地产物是加密的，自检前必须先拿到 key —— 与 runOnce 里那份同源。
-              const keyInfo = await loadOrCreateKey(dataDir);
+              const keyInfo = await loadOrCreateKey(dataDir, { kek });
               try {
                 check = await restoreCheck(gz, {
                   home,
@@ -1119,7 +1138,7 @@ function apply(ctx, config) {
           case "sync-backup.export-recovery-code": {
             // 用户主动点「导出」才给明文。平时 state / view 里只有掩码。
             // 它必须在 off-device 保管：换机器或重装后，没有它连本地产物也解不开。
-            const info = await loadOrCreateKey(dataDir);
+            const info = await loadOrCreateKey(dataDir, { kek });
             return okv({
               recoveryCode: info.recoveryCode,
               masked: maskRecoveryCode(info.recoveryCode),

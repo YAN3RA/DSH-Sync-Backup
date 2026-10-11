@@ -144,10 +144,41 @@ const webCtx = {
 //   - ctx.inject(...) —— 依赖 webServer 的 RPC 挂载点
 //   - ctx.logger      —— BackupScheduler 的日志出口
 // 早期版本只给了 tools/systemPrompt/effect，代码改用 ctx.get 后即判定失败（2026-10-09）。
+/**
+ * 宿主凭据服务的内存替身（只实现本插件用到的 record-half）。
+ *
+ * 形态照抄 @deepseek-ai/dsh-credentials-local：`readRecord` 对不存在的 key
+ * 返回 undefined（= 未初始化），`modifyRecord` 是唯一写路径且以当前值为入参。
+ * 本插件用它保管 `dsh-sync-backup/local-kek`。
+ */
+const credentialsStub = (() => {
+  const records = new Map();
+  return {
+    records,
+    async readRecord(key) { return records.get(String(key)); },
+    async modifyRecord(key, mutate) {
+      const cur = records.get(String(key));
+      const next = await mutate(cur);
+      if (next === undefined) return cur;
+      records.set(String(key), next);
+      return next;
+    },
+  };
+})();
+
 const ctx = {
   tools: { register: (def) => registered.push(def) },
   systemPrompt: systemPromptStub,
-  get: (name) => { getCalls.push(name); return name === "systemPrompt" ? systemPromptStub : undefined; },
+  get: (name) => {
+    getCalls.push(name);
+    if (name === "systemPrompt") return systemPromptStub;
+    // v4 信封加密要求「本机 KEK」由宿主凭据服务保管。真实宿主是
+    // @deepseek-ai/dsh-credentials-local，这里给一个同形的内存实现：
+    // record-half 的 readRecord / modifyRecord，key 固定为 <scope>/<id>。
+    // 不提供它，apply() 的密钥路径会（正确地）fail closed。
+    if (name === "credentials") return credentialsStub;
+    return undefined;
+  },
   inject: (names, cb) => {
     injectCalls.push([...names]);
     // 真实宿主在这里回调一个「connection/webServer 均已就绪」的子上下文。
