@@ -100,3 +100,4 @@ git clone --depth 1 --branch V1.0-261008 https://github.com/YAN3RA/DSH-Sync-Back
 | `V1.2-261011` | 2026-10-11 | 安装可用性修复：移除 `private`、补全 `files`、README 写明四种 spec；tarball 安装实测可用 |
 | `V1.3-261011` | 2026-10-11 | v4 信封加密：DEK 双包裹（本机 KEK 交 DSH 宿主凭据库、恢复码派生恢复 KEK），恢复码不再等于 DEK；fail closed 全路径（本机 KEK 丢失 = locked）；恢复元数据随 manifest 上行 |
 | `V1.4-261011` | 2026-10-11 | 只读版本检查：环境与维护页显示本机版本 / 远端最新 Release 标识 + 「检查更新」（一次不带凭据、不跟随重定向的 GET，失败红字给原文）；新增 `lib/version-check.js` 与 `version-check-smoke`（32 项） |
+| `V1.5-261011` | 2026-10-11 | **P0 修复**：消除 v4 引入的启动竞态 —— 插件的启动补跑早于宿主 `credentials` 服务挂载，导致首次备份必然失败（状态页误报「宿主凭据服务不可用」，而密钥与服务其实都好）。`hostKekStore` 改为有界等待服务就绪（默认 30 s 指数退避），超时才 fail closed；`scheduler.start()` 改为在 `ctx.inject(["credentials"])` 回调后执行。crypto-smoke 66 → 69 项 |
