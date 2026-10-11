@@ -25,6 +25,13 @@ const failures = [];
 
 function check(name, fn) {
   try {
+    // 防线：同步 check **不能**接 async 回调。它不 await —— Promise 被丢弃，
+    // 断言既不计数也不报错，回调内的装载还会与非串行 render 抢全局 navigator，
+    // 表现为 `exportsList[0] undefined`（Node 20 上必现，Node 24 只是时序侥幸）。
+    // 这类缺陷曾让 22 条渲染断言在 CI 上静默逃逸，故在此硬拦。
+    if (typeof fn === "function" && fn.constructor && fn.constructor.name === "AsyncFunction") {
+      throw new Error(`check() 收到 async 回调，必须改用 await checkAsync()：${name}`);
+    }
     fn();
     passed++;
   } catch (err) {
@@ -508,8 +515,15 @@ const renderSerial = (language, seeds, bust) => serialize(() => render(language,
  * 而原有断言一条都没红 —— 这类错位不会报错，只会让整棵树的分支静默跑偏。
  */
 function seedsFor(over = {}) {
+  // `selectedPaths` 是 view 的一个字段，但调用处习惯平铺传（`seedsFor({ selectedPaths: [...] })`）。
+  // 早先这里只认 `over.view`，平铺传入的那个键会被**静默忽略** —— view 退回 SEED_VIEW 的
+  // `selectedPaths: []`（默认集合语义），于是「自定义集合」的勾选态断言全都在测默认集合。
+  // 两条 case 因此恒红却没人发现：它们所在的 async 回调曾被不 await 的同步 check 吞掉。
+  const view = over.selectedPaths === undefined
+    ? (over.view ?? SEED_VIEW)
+    : { ...(over.view ?? SEED_VIEW), selectedPaths: over.selectedPaths };
   return [
-    over.view ?? SEED_VIEW,
+    view,
     over.note ?? "",
     over.tone ?? "info",
     over.busy ?? false,
@@ -550,7 +564,7 @@ check("默认停在概览：恰好一个 role=tab 被选中，且选中项是概
   assert.equal(tabs.length, 4, `tab count=${tabs.length}`);
   const sel = tabs.filter((n) => n.props["aria-selected"] === "true");
   assert.equal(sel.length, 1, `selected=${sel.length}`);
-  assert.ok(collectText(sel[0]).includes("概览"), `wrong default tab: ${JSON.stringify(collectText(sel[0]))}`);
+  assert.ok(collectText(sel[0]).join("").includes("概览"), `wrong default tab: ${JSON.stringify(collectText(sel[0]))}`);
 });
 check("健康条置顶且给出单一结论（data-tone=ok）", () => {
   const bars = zh.nodes.filter((n) => typeof n.props?.className === "string" && n.props.className.startsWith("dsb-health"));
@@ -738,8 +752,8 @@ check("环境和维护：显示「当前用的是默认集合」并给出两个�
   assert.ok(joined.includes("保存"), "应有「保存」按钮");
 });
 
-check("环境和维护：自定义集合时按 selectedPaths 渲染勾选态", async () => {
-  const custom = await render("zh-CN", seedsFor({
+await checkAsync("环境和维护：自定义集合时按 selectedPaths 渲染勾选态", async () => {
+  const custom = await renderSerial("zh-CN", seedsFor({
     tab: "env", sizes: SEED_SIZES, sizesState: "done",
     selectedPaths: ["sessions"],
   }), nextBust());
@@ -753,11 +767,11 @@ check("环境和维护：自定义集合时按 selectedPaths 渲染勾选态", a
   assert.ok(custom.text.join("\n").includes("自定义集合"), "应提示当前是自定义集合");
 });
 
-check("环境和维护：只剩一项时取消勾选不产生空集合（载荷不能为空）", async () => {
+await checkAsync("环境和维护：只剩一项时取消勾选不产生空集合（载荷不能为空）", async () => {
   // 「一个都不选」是无效状态：selectedPaths: [] 有专属语义（= 默认集合），
   // 不能同时用来表示「什么都不备份」。组件在算出的下一版为空时直接不回调，
   // 这里验证那个分支确实被走到 —— 而不是只断言「点了一下没崩」。
-  const one = await render("zh-CN", seedsFor({
+  const one = await renderSerial("zh-CN", seedsFor({
     tab: "env", sizes: SEED_SIZES, sizesState: "done",
     selectedPaths: ["persona"],
   }), nextBust());
@@ -776,7 +790,7 @@ check("环境和维护：只剩一项时取消勾选不产生空集合（载荷�
   assert.equal(threw, null, `取消最后一项不该抛错：${threw && threw.message}`);
 });
 
-check("环境和维护：目录集合的保存走白名单键 selectedPaths", async () => {
+await checkAsync("环境和维护：目录集合的保存走白名单键 selectedPaths", async () => {
   // 服务端只接受 GUI_EDITABLE_KEYS 里的键；这里确认前端保存用的正是那个键名，
   // 否则会出现「点了保存但服务端静默丢弃」这种最难查的一类不一致。
   const joined = env.text.join("\n");
@@ -852,36 +866,36 @@ check("英文环境页也不含 CJK（catalog 体积文案随语言走）", () =
 });
 
 /* —— 9.6 报告 5.3：维护按钮必须统一查 busy（备份进行中禁掉清理/体积/自检） —— */
-check("产物页：v.busy=true 时「立即清理」禁用（与 op 并行生效）", async () => {
+await checkAsync("产物页：v.busy=true 时「立即清理」禁用（与 op 并行生效）", async () => {
   const r = await renderSerial("zh-CN", seedsFor({ tab: "artifacts", view: { ...SEED_VIEW, busy: true } }), nextBust());
-  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("立即清理"));
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("立即清理"));
   assert.ok(btn, "prune button missing");
   assert.equal(btn.props.disabled, true, "prune must be disabled while a backup is running");
 });
-check("产物页：busy=false 且空闲时「立即清理」可点（回归反向位）", async () => {
+await checkAsync("产物页：busy=false 且空闲时「立即清理」可点（回归反向位）", async () => {
   const r = await renderSerial("zh-CN", seedsFor({ tab: "artifacts" }), nextBust());
-  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("立即清理"));
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("立即清理"));
   assert.ok(btn);
   assert.notEqual(btn.props.disabled, true, "prune must stay clickable when idle");
 });
-check("环境页：v.busy=true 时体积统计与恢复自检都禁用", async () => {
+await checkAsync("环境页：v.busy=true 时体积统计与恢复自检都禁用", async () => {
   const r = await renderSerial("zh-CN", seedsFor({
     tab: "env", view: { ...SEED_VIEW, busy: true }, sizes: SEED_SIZES, sizesState: "done",
   }), nextBust());
-  const recalc = r.nodes.find((n) => n.type === "button" && collectText(n).includes("重新统计体积"));
-  const verify = r.nodes.find((n) => n.type === "button" && collectText(n).includes("运行恢复前自检"));
+  const recalc = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("重新统计体积"));
+  const verify = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("运行恢复前自检"));
   assert.ok(recalc && verify, "env maintenance buttons missing");
   assert.equal(recalc.props.disabled, true, "recalc must be disabled while busy");
   assert.equal(verify.props.disabled, true, "restore-check must be disabled while busy");
 });
 /* —— 9.7 报告 5.5/3.4：恢复码的确认门与明文显示分支 —— */
-check("概览默认态：显示「导出恢复码」按钮，且不出现确认对话框", async () => {
+await checkAsync("概览默认态：显示「导出恢复码」按钮，且不出现确认对话框", async () => {
   const r = await renderSerial("zh-CN", seedsFor(), nextBust());
   const joined = r.text.join("\n");
   assert.ok(joined.includes("导出恢复码"), "export button missing");
   assert.equal(r.nodes.filter((n) => n.props?.role === "alertdialog").length, 0, "confirm dialog must not pre-render");
 });
-check("点导出先进确认门：pending=true 时渲染 alertdialog，含确认与取消", async () => {
+await checkAsync("点导出先进确认门：pending=true 时渲染 alertdialog，含确认与取消", async () => {
   const r = await renderSerial("zh-CN", seedsFor({ recoveryPending: true }), nextBust());
   const dlg = r.nodes.filter((n) => n.props?.role === "alertdialog");
   assert.equal(dlg.length, 1, `alertdialog count=${dlg.length}`);
@@ -890,13 +904,13 @@ check("点导出先进确认门：pending=true 时渲染 alertdialog，含确认
   assert.ok(joined.includes("60 秒"), "TTL must be stated before revealing plaintext");
   assert.ok(!joined.includes("恢复码（只显示这一次）"), "plaintext must NOT render before it was fetched");
 });
-check("拿到明文才进「只显示这一次」分支", async () => {
+await checkAsync("拿到明文才进「只显示这一次」分支", async () => {
   const r = await renderSerial("zh-CN", seedsFor({ recovery: "AAAA-BBBB-CCCC-DDDD" }), nextBust());
   const joined = r.text.join("\n");
   assert.ok(joined.includes("只显示这一次"), "shown-once label missing");
   assert.ok(joined.includes("AAAA-BBBB-CCCC-DDDD"), "plaintext code missing");
 });
-check("英文确认门不含 CJK", async () => {
+await checkAsync("英文确认门不含 CJK", async () => {
   const r = await renderSerial("en-US", seedsFor({ recoveryPending: true }), nextBust());
   const joined = r.text.join("\n");
   assert.ok(joined.includes("Confirm export"), "en confirm CTA missing");
@@ -904,7 +918,7 @@ check("英文确认门不含 CJK", async () => {
   assert.equal(cjk, null, `CJK leaked: ${JSON.stringify(cjk)}`);
 });
 /* —— 9.8 报告 5.4：可访问性契约 —— */
-check("tablist：四 tab 有 aria-controls 指向当前 tabpanel，roving tabindex 只让选中项可聚焦", async () => {
+await checkAsync("tablist：四 tab 有 aria-controls 指向当前 tabpanel，roving tabindex 只让选中项可聚焦", async () => {
   const r = await renderSerial("zh-CN", seedsFor({ tab: "channels" }), nextBust());
   const tabs = r.nodes.filter((n) => n.props?.role === "tab");
   assert.equal(tabs.length, 4);
@@ -918,13 +932,13 @@ check("tablist：四 tab 有 aria-controls 指向当前 tabpanel，roving tabind
   assert.equal(sel[0].props.tabIndex, 0, "selected tab must be focusable");
   assert.ok(tabs.filter((t) => t !== sel[0]).every((t) => t.props.tabIndex === -1), "unselected tabs must be tabIndex=-1");
 });
-check("tablist 挂键盘导航（←/→/Home/End 处理函数存在）", async () => {
+await checkAsync("tablist 挂键盘导航（←/→/Home/End 处理函数存在）", async () => {
   const r = await renderSerial("zh-CN", seedsFor(), nextBust());
   const list = r.nodes.find((n) => n.props?.role === "tablist");
   assert.ok(list, "tablist missing");
   assert.equal(typeof list.props.onKeyDown, "function", "tablist needs onKeyDown");
 });
-check("确认对话框：Escape 有处理且 aria-modal（通道确认与恢复码确认都算）", async () => {
+await checkAsync("确认对话框：Escape 有处理且 aria-modal（通道确认与恢复码确认都算）", async () => {
   const rc = await renderSerial("zh-CN", seedsFor({ recoveryPending: true }), nextBust());
   const dlg = rc.nodes.find((n) => n.props?.role === "alertdialog");
   assert.ok(dlg, "recovery confirm missing");
@@ -940,14 +954,14 @@ check("确认对话框：Escape 有处理且 aria-modal（通道确认与恢复�
   }
 });
 /* —— 9.9 报告 5.6：清理前必须显示将删除的份数与空间 —— */
-check("产物页：非确认态按钮是「立即清理」，不显示份数", async () => {
+await checkAsync("产物页：非确认态按钮是「立即清理」，不显示份数", async () => {
   const r = await renderSerial("zh-CN", seedsFor({ tab: "artifacts" }), nextBust());
-  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("立即清理"));
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("立即清理"));
   assert.ok(btn, "prune button missing");
   assert.equal(typeof btn.props.onClick, "function", "prune button needs onClick");
-  assert.ok(!collectText(btn).includes("确认删除"), "idle button must not show the confirm label");
+  assert.ok(!collectText(btn).join("").includes("确认删除"), "idle button must not show the confirm label");
 });
-check("产物页：确认态按钮显示将删份数与释放空间（destructive 先给数）", async () => {
+await checkAsync("产物页：确认态按钮显示将删份数与释放空间（destructive 先给数）", async () => {
   const r = await renderSerial("zh-CN", seedsFor({
     tab: "artifacts", op: "prune-confirm",
     prunePlan: { n: 3, bytes: "12.5 MB", kept: 7, total: 10 },
@@ -956,17 +970,17 @@ check("产物页：确认态按钮显示将删份数与释放空间（destructiv
   assert.ok(label.includes("确认删除 3 份"), `confirm label missing: ${label.slice(0, 300)}`);
   assert.ok(label.includes("12.5 MB"), "freed size missing from the confirm label");
 });
-check("产物页：确认态下按钮不被 busy 规则误放行（仍受 op/v.busy 约束）", async () => {
+await checkAsync("产物页：确认态下按钮不被 busy 规则误放行（仍受 op/v.busy 约束）", async () => {
   const r = await renderSerial("zh-CN", seedsFor({
     tab: "artifacts", op: "prune-confirm",
     prunePlan: { n: 1, bytes: "1 MB", kept: 0, total: 1 },
     view: { ...SEED_VIEW, busy: true },
   }), nextBust());
-  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).includes("确认删除"));
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("确认删除"));
   assert.ok(btn, "confirm button missing");
   assert.equal(btn.props.disabled, true, "confirm must stay disabled while a backup runs");
 });
-check("英文确认态不含 CJK", async () => {
+await checkAsync("英文确认态不含 CJK", async () => {
   const r = await renderSerial("en-US", seedsFor({
     tab: "artifacts", op: "prune-confirm",
     prunePlan: { n: 2, bytes: "3 MB", kept: 1, total: 3 },
@@ -977,19 +991,19 @@ check("英文确认态不含 CJK", async () => {
   assert.equal(cjk, null, `CJK leaked into en artifacts render: ${JSON.stringify(cjk)}`);
 });
 /* —— 9.10 报告 5.6 / 10.2：概览页诊断折叠 —— */
-check("概览页：诊断明细折在 details 里，summary 可见且可折叠", async () => {
+await checkAsync("概览页：诊断明细折在 details 里，summary 可见且可折叠", async () => {
   const r = await renderSerial("zh-CN", seedsFor(), nextBust());
   const det = r.nodes.filter((n) => n.type === "details");
   assert.equal(det.length, 1, `details count=${det.length}`);
   assert.ok(det[0].props?.className === "dsb-details", "details needs its class");
   const sum = det[0].children.find((c) => c && c.type === "summary");
   assert.ok(sum, "details needs a summary");
-  assert.ok(collectText(sum).includes("诊断详情"), "summary label missing");
+  assert.ok(collectText(sum).join("").includes("诊断详情"), "summary label missing");
   // 诊断项必须在 details 内，而不是散在概览主体
   const inDetails = collectText(det[0]);
   assert.ok(inDetails.includes("耗时") || inDetails.includes("累计"), `diagnostics not inside details: ${inDetails.slice(0, 200)}`);
 });
-check("概览页：常用项（下次计划 / 上次结果）留在折叠区之外", async () => {
+await checkAsync("概览页：常用项（下次计划 / 上次结果）留在折叠区之外", async () => {
   const r = await renderSerial("zh-CN", seedsFor(), nextBust());
   const det = r.nodes.find((n) => n.type === "details");
   const outside = r.text.join("\n");
@@ -998,23 +1012,23 @@ check("概览页：常用项（下次计划 / 上次结果）留在折叠区之�
   const detText = collectText(det);
   assert.ok(!detText.includes("下次计划"), "next run must NOT be inside the collapsed diagnostics");
 });
-check("英文诊断折叠区不含 CJK", async () => {
+await checkAsync("英文诊断折叠区不含 CJK", async () => {
   const r = await renderSerial("en-US", seedsFor(), nextBust());
   const det = r.nodes.find((n) => n.type === "details");
   assert.ok(det, "details missing in en render");
-  const joined = collectText(det);
+  const joined = collectText(det).join("");
   const cjk = joined.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g);
   assert.equal(cjk, null, `CJK leaked into en diagnostics: ${JSON.stringify(cjk)}`);
 });
 /* —— 9.11 报告 3.3：恢复码区必须讲清威胁模型 —— */
-check("概览页恢复码卡：说明「密钥与归档同目录」这一限制", async () => {
+await checkAsync("概览页恢复码卡：说明「密钥与归档同目录」这一限制", async () => {
   const r = await renderSerial("zh-CN", seedsFor(), nextBust());
   const joined = r.text.join("\n");
   assert.ok(joined.includes("key.b64"), "must name the key file");
   assert.ok(joined.includes("加密保护的是归档离开本机之后"), `threat model wording missing: ${joined.slice(0, 400)}`);
   assert.ok(joined.includes("不防能读你本机这个目录的人"), "must state what encryption does NOT protect against");
 });
-check("英文恢复码卡也有同等的威胁模型说明", async () => {
+await checkAsync("英文恢复码卡也有同等的威胁模型说明", async () => {
   const r = await renderSerial("en-US", seedsFor(), nextBust());
   const joined = r.text.join("\n");
   assert.ok(joined.includes("key.b64"), "en must name the key file");

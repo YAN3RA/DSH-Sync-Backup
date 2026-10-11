@@ -17,6 +17,7 @@
 import path from "node:path";
 import os from "node:os";
 import { gunzipSync } from "node:zlib";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 
 import { collect, isForbidden, listWhitelistFiles, sha256, WHITELIST } from "../lib/collect.js";
 import { buildArchive, openArchive, splitUstarPath, NAME_MAX, PREFIX_MAX } from "../lib/archive.js";
@@ -24,7 +25,8 @@ import { buildArchive, openArchive, splitUstarPath, NAME_MAX, PREFIX_MAX } from 
 const argv = process.argv.slice(2);
 const full = argv.includes("--full");
 const homeIdx = argv.indexOf("--home");
-const home = homeIdx !== -1 && argv[homeIdx + 1] ? path.resolve(argv[homeIdx + 1]) : path.join(os.homedir(), ".dsh");
+const explicitHome = homeIdx !== -1 && Boolean(argv[homeIdx + 1]);
+let home = explicitHome ? path.resolve(argv[homeIdx + 1]) : path.join(os.homedir(), ".dsh");
 
 const mb = (n) => (n / 1024 / 1024).toFixed(2) + " MB";
 const pct = (a, b) => (b === 0 ? "0%" : ((a / b) * 100).toFixed(1) + "%");
@@ -34,6 +36,61 @@ function check(ok, label, detail = "") {
   const mark = ok ? "  ✓" : "  ✗";
   if (!ok) failures++;
   console.log(`${mark} ${label}${detail ? "  — " + detail : ""}`);
+}
+
+/**
+ * 造一份确定性的合成 $DSH_HOME。
+ *
+ * 为什么需要它：本脚本有两条断言直接依赖 home 的**真实内容** ——
+ *   [1] 「收集到文件」= entries.length > 0
+ *   [3] 「确实存在需要拆分的长路径」= longPaths.length > 0
+ * 开发机上 ~/.dsh 有内容所以一直绿；CI runner 上是干净机器，收集结果是 0 文件，
+ * 于是两条断言必然红灯（实测：✗ 收集到文件 0 个 + ✗ 需要拆分的长路径 0 条）。
+ * 这不是 CI 配置的问题 —— 让测试的通过与否取决于「跑测试那台机器碰巧装过什么」，
+ * 本身就是缺陷。所以：没有显式 --home 且默认 home 收集不到东西时，回落到这份 fixture，
+ * 让「零网络、零凭据、干净 runner」也能完整覆盖打包/往返/长路径拆分三条主链路。
+ *
+ * 路径刻意设计成真需要 USTAR prefix 拆分（>100 字节），但**每一段都 ≤100 字节**，
+ * 这样既走到拆分分支，又不需要 GNU/PAX 扩展头（与 [3] 的两条容量断言一致）。
+ */
+async function makeFixtureHome() {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dsb-dryrun-fixture-"));
+  const longA = `memory/${"a".repeat(80)}/${"b".repeat(30)}.md`;
+  const longB = `memory/notes/${"c".repeat(90)}.md`;
+
+  const files = new Map([
+    // 白名单内的常规条目（AGENTS.md / dsh-auto-memory.json 是 file 规则）
+    ["AGENTS.md", "# fixture persona\n"],
+    ["dsh-auto-memory.json", '{"schemaVersion":1}\n'],
+    ["memory/MEMORY.md", "# fixture memory\n" + "x".repeat(200) + "\n"],
+    ["memory/DAILY.md", "# fixture daily\n" + "y".repeat(120) + "\n"],
+    // 顶层 glob 规则：dsh-config-manager/sync/*.json 只收顶层
+    ["dsh-config-manager/sync/targets.json", '{"kind":"fixture"}\n'],
+    // 长路径样本（>100 字节，驱动 [3] 的拆分分支）
+    [longA, "long-a\n"],
+    [longB, "long-b\n"],
+    // 危险路径：白名单外的文件**不该**被收走，用来验证结构性排除仍然成立
+    [".credentials.yaml", "must-never-be-collected\n"],
+  ]);
+
+  for (const [rel, content] of files) {
+    const abs = path.join(root, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, content, "utf8");
+  }
+  return root;
+}
+
+let fixtureHome = null;
+if (!explicitHome) {
+  // 只用 listWhitelistFiles 探测：它只遍历目录、**不读文件内容**，
+  // 因此这份探测在真机上几乎零成本（collect 会把 65 MB 全读进内存）。
+  const probe = await listWhitelistFiles(home).catch(() => null);
+  if (!probe || probe.files.length === 0) {
+    fixtureHome = await makeFixtureHome();
+    home = fixtureHome;
+    console.log(`⚠️  默认 home 收集不到文件，改用确定性 fixture：${home}\n`);
+  }
 }
 
 console.log("=== dsh-sync-backup dry-run ===");
@@ -139,6 +196,10 @@ if (!full && sampledBytes > 0) {
 }
 
 console.log("\n=== 结果 ===");
+// fixture 是临时目录，跑完即删；显式 --home 时 fixtureHome 为 null，不动用户目录。
+if (fixtureHome) {
+  await rm(fixtureHome, { recursive: true, force: true }).catch(() => {});
+}
 if (failures === 0) {
   console.log("全部检查通过 ✓");
   process.exit(0);
