@@ -1021,12 +1021,16 @@ await checkAsync("英文诊断折叠区不含 CJK", async () => {
   assert.equal(cjk, null, `CJK leaked into en diagnostics: ${JSON.stringify(cjk)}`);
 });
 /* —— 9.11 报告 3.3：恢复码区必须讲清威胁模型 —— */
-await checkAsync("概览页恢复码卡：说明「密钥与归档同目录」这一限制", async () => {
+await checkAsync("概览页恢复码卡：讲清信封加密的边界（防什么、不防什么）", async () => {
   const r = await renderSerial("zh-CN", seedsFor(), nextBust());
   const joined = r.text.join("\n");
   assert.ok(joined.includes("key.b64"), "must name the key file");
   assert.ok(joined.includes("加密保护的是归档离开本机之后"), `threat model wording missing: ${joined.slice(0, 400)}`);
-  assert.ok(joined.includes("不防能读你本机这个目录的人"), "must state what encryption does NOT protect against");
+  // 「不防什么」必须留在界面上：v4 起措辞从「同目录」改为「能读 .dsh 目录的人」，
+  // 但**这句话本身不能消失** —— 用户若以为本机 KEK 提供了加密增益，就是被误导。
+  assert.ok(joined.includes("不防能读你本机"), "must state what encryption does NOT protect against");
+  // 同时必须点明本机 KEK 的实际保护级别（物理隔离，不是加密增益）
+  assert.ok(joined.includes("信封加密"), "must name the envelope scheme");
 });
 await checkAsync("英文恢复码卡也有同等的威胁模型说明", async () => {
   const r = await renderSerial("en-US", seedsFor(), nextBust());
