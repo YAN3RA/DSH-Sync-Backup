@@ -654,7 +654,7 @@ check("产物文件：远端摘要区分 WebDAV / GitHub，且 SHA256 只取前 
 await checkAsync("产物文件：空态单独处理（无 items 时给空态文案、仍保留清理入口）", async () => {
   const emptyView = { ...SEED_VIEW, artifacts: { ...SEED_VIEW.artifacts, items: [] } };
   const e = await renderSerial("zh-CN", seedsFor({ tab: "artifacts", view: emptyView }), nextBust());
-  assert.ok(e.text.join("\n").includes("本地没有归档产物"), "empty hint missing");
+  assert.ok(e.text.join("\n").includes("本地暂无可用的归档产物"), "empty hint missing");
   assert.equal(e.classes.includes("dsb-table"), false, "table must not render when empty");
   assert.ok(e.text.includes("立即清理"), "prune button must survive the empty state");
 });
@@ -975,6 +975,52 @@ check("英文确认态不含 CJK", async () => {
   assert.ok(joined.includes("Delete 2"), `en confirm label missing: ${joined.slice(0, 300)}`);
   const cjk = joined.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g);
   assert.equal(cjk, null, `CJK leaked into en artifacts render: ${JSON.stringify(cjk)}`);
+});
+/* —— 9.10 报告 5.6 / 10.2：概览页诊断折叠 —— */
+check("概览页：诊断明细折在 details 里，summary 可见且可折叠", async () => {
+  const r = await renderSerial("zh-CN", seedsFor(), nextBust());
+  const det = r.nodes.filter((n) => n.type === "details");
+  assert.equal(det.length, 1, `details count=${det.length}`);
+  assert.ok(det[0].props?.className === "dsb-details", "details needs its class");
+  const sum = det[0].children.find((c) => c && c.type === "summary");
+  assert.ok(sum, "details needs a summary");
+  assert.ok(collectText(sum).includes("诊断详情"), "summary label missing");
+  // 诊断项必须在 details 内，而不是散在概览主体
+  const inDetails = collectText(det[0]);
+  assert.ok(inDetails.includes("耗时") || inDetails.includes("累计"), `diagnostics not inside details: ${inDetails.slice(0, 200)}`);
+});
+check("概览页：常用项（下次计划 / 上次结果）留在折叠区之外", async () => {
+  const r = await renderSerial("zh-CN", seedsFor(), nextBust());
+  const det = r.nodes.find((n) => n.type === "details");
+  const outside = r.text.join("\n");
+  assert.ok(outside.includes("下次计划"), "next run must stay visible");
+  // 并在 details 之前出现（即未被折进去）
+  const detText = collectText(det);
+  assert.ok(!detText.includes("下次计划"), "next run must NOT be inside the collapsed diagnostics");
+});
+check("英文诊断折叠区不含 CJK", async () => {
+  const r = await renderSerial("en-US", seedsFor(), nextBust());
+  const det = r.nodes.find((n) => n.type === "details");
+  assert.ok(det, "details missing in en render");
+  const joined = collectText(det);
+  const cjk = joined.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g);
+  assert.equal(cjk, null, `CJK leaked into en diagnostics: ${JSON.stringify(cjk)}`);
+});
+/* —— 9.11 报告 3.3：恢复码区必须讲清威胁模型 —— */
+check("概览页恢复码卡：说明「密钥与归档同目录」这一限制", async () => {
+  const r = await renderSerial("zh-CN", seedsFor(), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("key.b64"), "must name the key file");
+  assert.ok(joined.includes("加密保护的是归档离开本机之后"), `threat model wording missing: ${joined.slice(0, 400)}`);
+  assert.ok(joined.includes("不防能读你本机这个目录的人"), "must state what encryption does NOT protect against");
+});
+check("英文恢复码卡也有同等的威胁模型说明", async () => {
+  const r = await renderSerial("en-US", seedsFor(), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("key.b64"), "en must name the key file");
+  assert.ok(joined.includes("after they leave this machine"), `en threat model missing: ${joined.slice(0, 400)}`);
+  const cjk = joined.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g);
+  assert.equal(cjk, null, `CJK leaked: ${JSON.stringify(cjk)}`);
 });
 section("结果");
 if (failures.length > 0) {
