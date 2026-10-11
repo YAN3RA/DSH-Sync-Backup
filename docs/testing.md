@@ -17,6 +17,7 @@ npm run dry-run:full  # full pack + per-file SHA256 comparison on extraction
 | `client-smoke` / `client-contract` | Client half: module loader, slot registration, four tabs, i18n keys, endpoint allowlist, no password field |
 | `crypto-smoke` | Encryption round-trip, IV uniqueness, wrong-key rejection, cross-machine recovery-code restore |
 | `webdav-smoke` / `github-smoke` | Both clients against injected fake requests — **zero network** |
+| `version-check-smoke` | Read-only update check: tag parsing, comparison edges, request shape (no `Authorization`), and every failure collapsing into a readable message |
 | `scheduler-smoke` / `channels-smoke` | Fake clock and timers; two-channel orchestration on local fake servers |
 
 `smoke` uses `--import ./tools/_hooks-register.mjs` to redirect the two harness packages to minimal

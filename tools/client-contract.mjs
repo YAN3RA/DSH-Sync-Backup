@@ -82,6 +82,8 @@ const ALLOWED = new Set([
   // v3：界面开始写配置 / 按需导出恢复码
   "sync-backup.save-config",
   "sync-backup.export-recovery-code",
+  // v4：只读版本检查（一次不带凭据的 GET，不写盘）
+  "sync-backup.check-update",
 ]);
 const called = new Set([...src.matchAll(/call\(\s*"(sync-backup\.[a-z-]+)"/g)].map((m) => m[1]));
 if (called.size === 0) fail("没找到任何 call() 端点调用");

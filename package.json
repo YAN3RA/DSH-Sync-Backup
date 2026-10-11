@@ -1,6 +1,6 @@
 {
   "name": "dsh-sync-backup",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "type": "module",
   "description": "DSH timed backup: packs the memory layer (memory/handoff/skills/storages/sessions) that dsh-config-manager does not cover and uploads it to WebDAV + GitHub. No third-party npm dependencies; the two declared peers are provided by the harness.",
   "keywords": [
@@ -28,6 +28,7 @@
     "./lib/crypto.js": "./lib/crypto.js",
     "./lib/keyring.js": "./lib/keyring.js",
     "./lib/user-config.js": "./lib/user-config.js",
+    "./lib/version-check.js": "./lib/version-check.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
@@ -69,11 +70,12 @@
     "set-github-token": "node tools/set-github-token.mjs",
     "client-smoke": "node tools/client-smoke.mjs",
     "client-contract": "node tools/client-contract.mjs",
+    "version-check-smoke": "node tools/version-check-smoke.mjs",
     "crypto-smoke": "node tools/crypto-smoke.mjs",
     "security-smoke": "node tools/security-smoke.mjs",
     "host-gates": "node tools/host-gates.mjs",
     "smoke": "node --import ./tools/_hooks-register.mjs tools/smoke.mjs",
-    "test": "npm run smoke && npm run security-smoke && npm run client-smoke && npm run client-contract && npm run crypto-smoke && npm run webdav-smoke && npm run github-smoke && npm run scheduler-smoke && npm run channels-smoke && npm run dry-run"
+    "test": "npm run smoke && npm run security-smoke && npm run client-smoke && npm run client-contract && npm run version-check-smoke && npm run crypto-smoke && npm run webdav-smoke && npm run github-smoke && npm run scheduler-smoke && npm run channels-smoke && npm run dry-run"
   },
   "engines": {
     "node": ">=20"

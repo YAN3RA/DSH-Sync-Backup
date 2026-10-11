@@ -17,6 +17,7 @@ lib/webdav.js     WebDAV client; lib/github.js GitHub contents API client
 lib/artifacts.js  local artifact listing + pruning; lib/restore-check.js pre-restore verification
 lib/scheduler.js  self-rescheduling timers with exponential backoff
 lib/user-config.js  config.json allowlist + per-key validation
+lib/version-check.js  read-only "latest release" lookup (credential-free GET) + version comparison
 tools/            verification suites and the two credential helpers
 ```
 

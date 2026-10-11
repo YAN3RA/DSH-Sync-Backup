@@ -306,6 +306,9 @@ const SEED_VIEW = {
   recoveryCodeIsNew: false,
   // 用渲染时刻做相对时间基准，避免断言依赖真实时钟。
   now: new Date("2026-10-09T13:43:06.498Z").toISOString(),
+  // v4：本机版本与发布源由 host 下发（前端不写死版本号）。
+  pluginVersion: "1.3.0",
+  releaseRepo: "YAN3RA/DSH-Sync-Backup",
 };
 
 /** catalog-sizes 的种子结果（host 半返回 {entries:[{id,fileCount,bytes}]}）。 */
@@ -444,6 +447,8 @@ check("client 只调用 host 已实现的端点（无臆造端点）", () => {
     "sync-backup.restore-check", "sync-backup.catalog-sizes",
     // v3：界面开始写配置 / 按需导出恢复码
     "sync-backup.save-config", "sync-backup.export-recovery-code",
+    // v4：只读版本检查
+    "sync-backup.check-update",
   ]);
   const unknown = ENDPOINTS_IN_SOURCE.filter((e) => !known.has(e));
   assert.deepEqual(unknown, [], `unknown endpoints: ${JSON.stringify(unknown)}`);
@@ -507,7 +512,8 @@ const renderSerial = (language, seeds, bust) => serialize(() => render(language,
 /**
  * useState 种子必须与组件内**声明顺序**严格对齐，否则整棵树的分支会跑偏。
  * SyncBackupSection 的顺序：view, note, tone, busy, ready, tab, op, sizes, sizesState,
- * check, prunePlan, copyNote, recovery, recoveryNote, recoveryPending, recoveryExpiresAt, alive
+ * check, prunePlan, copyNote, recovery, recoveryNote, recoveryPending, recoveryExpiresAt,
+ * version, versionState, alive
  *
  * ⚠️ v3 新增了 recovery / recoveryNote 两个 state，两者之间务必同步：
  * 少给一个种子，后面的一切都会往前挪一位。曾经就因为少了它们，recovery 拿到了本该属于
@@ -539,6 +545,9 @@ function seedsFor(over = {}) {
     over.recoveryNote ?? "",
     over.recoveryPending ?? false,
     over.recoveryExpiresAt ?? 0,
+    // v4：版本检查（null=未检查 / idle）
+    over.version ?? null,
+    over.versionState ?? "idle",
     { current: true },
   ];
 }
@@ -831,6 +840,88 @@ check("环境和维护：备份数据验证渲染 ok/errors/warnings/stats + 不
   assert.ok(joined.includes("缺少 manifest"), "warning rendered missing");
   assert.ok(joined.includes("368"), "stats entries missing");
   assert.ok(joined.includes("1"), "stats longPaths missing");
+});
+
+/* —— 9.4b v4 只读版本检查 —— */
+check("环境和维护：版本卡片默认态显示本机版本 + 发布源 + 未检查", () => {
+  const joined = env.text.join("\n");
+  assert.ok(joined.includes("当前版本"), "local version row missing");
+  assert.ok(joined.includes("远端版本"), "remote version row missing");
+  assert.ok(joined.includes("发布源"), "release source row missing");
+  assert.ok(joined.includes("1.3.0"), `本机版本应由 host 下发: ${joined.slice(0, 600)}`);
+  assert.ok(joined.includes("YAN3RA/DSH-Sync-Backup"), "release repo value missing");
+  assert.ok(joined.includes("未检查"), "idle state must say so");
+  assert.ok(joined.includes("检查更新"), "check button missing");
+});
+check("环境和维护：版本卡片说明是只读检查（不下载/不写入/不带凭据）", () => {
+  const joined = env.text.join("\n");
+  assert.ok(joined.includes("只读检查"), "must state it is read-only");
+  assert.ok(joined.includes("不带任何凭据"), "must state no credentials are sent");
+});
+check("环境和维护：版本卡片在只读态不出现红字错误块", () => {
+  const bad = env.nodes.filter((n) => n.props?.["data-tone"] === "error" && typeof n.props?.className === "string" && n.props.className.includes("dsb-note"));
+  assert.equal(bad.length, 0, "未检查时不得显示失败红字");
+});
+await checkAsync("环境和维护：远端更新时给出「有新版本可用」并附 Release 链接", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "env", sizes: SEED_SIZES, sizesState: "done",
+    version: {
+      ok: true, local: "1.3.0", remote: "V1.4-261011", remoteName: "V1.4-261011",
+      htmlUrl: "https://github.com/YAN3RA/DSH-Sync-Backup/releases/tag/V1.4-261011",
+      publishedAt: "2026-10-11T12:00:00Z", prerelease: false,
+      status: "outdated", checkedAt: "2026-10-11T13:00:00Z",
+    },
+    versionState: "done",
+  }), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("V1.4-261011"), `远端标识缺失: ${joined.slice(0, 900)}`);
+  assert.ok(joined.includes("有新版本可用"), "outdated wording missing");
+  const warn = r.nodes.filter((n) => n.props?.className === "dsb-badge" && n.props["data-tone"] === "warn");
+  assert.ok(warn.length >= 1, "outdated must carry a warn badge (颜色不单独承载信息，但也必须有色)");
+  const link = r.nodes.find((n) => n.type === "a" && String(n.props?.href ?? "").includes("releases/tag/"));
+  assert.ok(link, "release link missing");
+  assert.equal(link.props.target, "_blank");
+  assert.ok(String(link.props.rel).includes("noreferrer"), "外链必须带 rel=noreferrer");
+});
+await checkAsync("环境和维护：已是最新时给出「已是最新」且不带 warn", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "env", sizes: SEED_SIZES, sizesState: "done",
+    version: { ok: true, local: "1.3.0", remote: "V1.3-261011", status: "same", htmlUrl: null, publishedAt: null },
+    versionState: "done",
+  }), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("已是最新"), "same wording missing");
+  const warn = r.nodes.filter((n) => n.props?.className === "dsb-badge" && n.props["data-tone"] === "warn");
+  assert.equal(warn.length, 0, "same 不应带 warn");
+});
+await checkAsync("环境和维护：检查失败时红字输出原因原文（不是一句「失败」）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "env", sizes: SEED_SIZES, sizesState: "done",
+    version: { ok: false, reason: "网络错误：getaddrinfo ENOTFOUND api.github.com" },
+    versionState: "done",
+  }), nextBust());
+  const joined = r.text.join("\n");
+  assert.ok(joined.includes("检查失败"), "failure label missing");
+  assert.ok(joined.includes("ENOTFOUND"), `失败原文必须显示: ${joined.slice(0, 900)}`);
+  const err = r.nodes.filter((n) => n.props?.className === "dsb-note" && n.props["data-tone"] === "error");
+  assert.ok(err.length >= 1, "失败原因必须以 error 语义块渲染（红字）");
+  assert.equal(err[0].props.role, "status", "失败提示应可被读屏播报");
+});
+await checkAsync("环境和维护：检查中时按钮禁用且显示「检查中…」（防连点）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "env", sizes: SEED_SIZES, sizesState: "done", versionState: "checking",
+  }), nextBust());
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("检查中"));
+  assert.ok(btn, "checking button missing");
+  assert.equal(btn.props.disabled, true, "检查中必须禁用");
+});
+await checkAsync("环境和维护：备份进行中「检查更新」仍可点（只读，不参与互斥）", async () => {
+  const r = await renderSerial("zh-CN", seedsFor({
+    tab: "env", view: { ...SEED_VIEW, busy: true }, sizes: SEED_SIZES, sizesState: "done",
+  }), nextBust());
+  const btn = r.nodes.find((n) => n.type === "button" && collectText(n).join("").includes("检查更新"));
+  assert.ok(btn, "check button missing while busy");
+  assert.notEqual(btn.props.disabled, true, "只读检查不该被备份运行禁掉");
 });
 
 /* —— 9.5 英文（i18n 回归） —— */

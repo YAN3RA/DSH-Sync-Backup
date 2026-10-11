@@ -25,7 +25,7 @@
 dsh-sync-backup
 ```
 ```text
-https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.3-261011.tar.gz
+https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.4-261011.tar.gz
 ```
 ```text
 git+https://github.com/YAN3RA/DSH-Sync-Backup.git
@@ -47,7 +47,7 @@ git+https://github.com/YAN3RA/DSH-Sync-Backup.git
 
 ```sh
 dsh plugin --profile desktop add dsh-sync-backup
-dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.3-261011.tar.gz
+dsh plugin --profile desktop add https://github.com/YAN3RA/DSH-Sync-Backup/archive/refs/tags/V1.4-261011.tar.gz
 dsh plugin --profile desktop add git+https://github.com/YAN3RA/DSH-Sync-Backup.git
 ```
 
@@ -239,7 +239,7 @@ DSH 的记忆散在 `~/.dsh` 里：全局人格 `AGENTS.md`、长期记忆 `memo
 - **恢复码派生恢复 KEK**（base32 编码），**不落盘、无法事后重算**；面板只显掩码，点导出要过二次确认，明文 60 秒自动隐藏、离开页签即清空；首次生成/迁移时必须一次性抄走；
 - **产物文件页**：本地加密归档列表（文件名 / 体积 / 时间）+ 远端副本摘要 + 立即清理；
 - **通道配置页**：改「数据发往哪里」必须二次确认；开关从关变开也要确认（反向不拦）；
-- **环境页**：逐条目本机体积统计、运行环境事实、备份集合的保存与恢复默认；
+- **环境页**：逐条目本机体积统计、运行环境事实、备份集合的保存与恢复默认、**只读版本检查**（本机版本 / 远端最新 Release + 失败红字原因）；
 - **零第三方 npm 依赖**：只用 Node 内置模块；声明的两个 peerDependencies 由 harness 提供；
 - **可访问性**：页签支持 ←/→/Home/End 键盘导航、roving tabindex、`aria-controls` ↔ `tabpanel`，确认框支持 Escape 取消。
 
@@ -254,12 +254,13 @@ DSH 的记忆散在 `~/.dsh` 里：全局人格 `AGENTS.md`、长期记忆 `memo
 | `V1.0-261008` | 初版（V1.0），2026-10-08 推送 |
 | `V1.2-261011` | 第 2 次迭代，2026-10-11 推送 |
 | `V1.3-261011` | 第 3 次迭代，2026-10-11 推送 |
+| `V1.4-261011` | 第 4 次迭代，2026-10-11 推送 |
 
 - **主版本号**（`V1`）：重大架构变化时递增；
 - **次版本号**（`.0` / `.1` / `.2`）：**每次迭代十进制递增**；
 - **日期**（`261008`）：该次发布的**推送日期**（`YYMMDD`）。
 
-`package.json` 的 `version` 保持 npm 合法的 semver 形式（`V1.3-261011` ↔ `1.3.0`），日期只体现在 **git tag** 与 Release 上。
+`package.json` 的 `version` 保持 npm 合法的 semver 形式（`V1.4-261011` ↔ `1.4.0`），日期只体现在 **git tag** 与 Release 上。
 
 **发版流程（开发者）**：
 
@@ -268,8 +269,8 @@ DSH 的记忆散在 `~/.dsh` 里：全局人格 `AGENTS.md`、长期记忆 `memo
 git push origin main
 
 # 2. 打 annotated tag 并推送
-git tag -a V1.3-261011 -m "发布说明：……"
-git push origin V1.3-261011
+git tag -a V1.4-261011 -m "发布说明：……"
+git push origin V1.4-261011
 
 # 3. 在 GitHub 建 Release，上传按版本打包的 zip 作为 Asset
 ```

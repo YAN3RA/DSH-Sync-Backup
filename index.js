@@ -38,6 +38,8 @@ import { WebDavError } from "./lib/webdav.js";
 import { GitHubError } from "./lib/github.js";
 import { createChannels, archiveId, WEBDAV_REF, GITHUB_REF } from "./lib/channels.js";
 import { BackupScheduler } from "./lib/scheduler.js";
+import { VERSION } from "./lib/version.js";
+import { fetchLatestRelease, compareVersions, RELEASE_REPO } from "./lib/version-check.js";
 
 /** Cordis 插件名；必须与 cordis.patch.yml 的 `- id:` 逐字一致。 */
 const name = "sync-backup";
@@ -842,6 +844,12 @@ function apply(ctx, config) {
       recoveryCodeMasked: maskRecoveryCode(recovery.recoveryCode),
       recoveryCodeIsNew: recovery.created === true,
       encryptedDefault: true,
+      // ---- v4：只读版本检查 ----
+      // 本机版本取 lib/version.js（唯一来源 = package.json），不另起一份常量。
+      // 远端版本**不在这里查** —— status 会被面板自动轮询，绝不能在刷新路径上出网。
+      // 远端版本由用户点「检查更新」时走 sync-backup.check-update 端点现查。
+      pluginVersion: VERSION,
+      releaseRepo: RELEASE_REPO,
       now: new Date().toISOString(),
     };
     return { ...st, view, runState, text: lines.join("\n"), lines };
@@ -990,6 +998,8 @@ function apply(ctx, config) {
   //
   // 安全口径：本通道**绝不接受上传参数** —— 真实出网只能由 agent 工具 `sync_backup_run`
   // 显式 upload:true 触发（还须 dryRun=false）。GUI 只能触发本地打包。
+  // 唯一的例外是 v4 的 `sync-backup.check-update`：一次**不带凭据、不跟随重定向、
+  // 目标由常量拼出**的只读 GET（读最新 Release 标识），不写盘、不下载 asset。
   const RPC_CHANNEL = "/sync-backup";
 
   const mountRpc = (owner) => {
@@ -1143,6 +1153,46 @@ function apply(ctx, config) {
               recoveryCode: info.recoveryCode,
               masked: maskRecoveryCode(info.recoveryCode),
               created: info.created === true,
+            });
+          }
+          // ---- v4：只读版本检查 ----
+          case "sync-backup.check-update": {
+            // 用户主动点「检查更新」才出网，**只有这一次不带凭据的 GET**。
+            //
+            // 为什么不放进 status：面板会轮询 status，把网络请求挂在那里等于
+            // 让刷新按钮偷偷发网络请求 —— 既浪费配额，也让「点刷新」的含义变脏。
+            //
+            // 安全口径：目标 URL 由常量（api.github.com + RELEASE_REPO）拼出，
+            // 不接受调用方传 URL，所以没有「被引导去内网」的输入面；请求头不带
+            // Authorization，因此即便仓库被篡改也偷不走任何凭据；不跟随重定向。
+            // 失败不是异常，而是一个要显示红字的结果，故一律走 okv。
+            //
+            // 不持锁：它与备份/清理无共享可变状态，为一次只读 GET 去排队等一次
+            // 完整备份结束，只会让用户以为按钮坏了。
+            const rel = await fetchLatestRelease({ repo: RELEASE_REPO });
+            if (rel.ok !== true) {
+              return okv({
+                ok: false,
+                reason: rel.message,
+                local: VERSION,
+                repo: RELEASE_REPO,
+                checkedAt: new Date().toISOString(),
+              });
+            }
+            const cmp = compareVersions(VERSION, rel.tag);
+            return okv({
+              ok: true,
+              local: VERSION,
+              repo: RELEASE_REPO,
+              remote: rel.tag,
+              remoteName: rel.name,
+              htmlUrl: rel.htmlUrl,
+              publishedAt: rel.publishedAt,
+              prerelease: rel.prerelease,
+              status: cmp.status,
+              localSemver: cmp.localSemver,
+              remoteSemver: cmp.remoteSemver,
+              checkedAt: new Date().toISOString(),
             });
           }
           default:

@@ -99,3 +99,4 @@ git clone --depth 1 --branch V1.0-261008 https://github.com/YAN3RA/DSH-Sync-Back
 | `V1.1-261011` | 2026-10-11 | 清理预览（destructive 先给数）· 术语统一 · 概览诊断折叠 · 恢复码区威胁模型说明 |
 | `V1.2-261011` | 2026-10-11 | 安装可用性修复：移除 `private`、补全 `files`、README 写明四种 spec；tarball 安装实测可用 |
 | `V1.3-261011` | 2026-10-11 | v4 信封加密：DEK 双包裹（本机 KEK 交 DSH 宿主凭据库、恢复码派生恢复 KEK），恢复码不再等于 DEK；fail closed 全路径（本机 KEK 丢失 = locked）；恢复元数据随 manifest 上行 |
+| `V1.4-261011` | 2026-10-11 | 只读版本检查：环境与维护页显示本机版本 / 远端最新 Release 标识 + 「检查更新」（一次不带凭据、不跟随重定向的 GET，失败红字给原文）；新增 `lib/version-check.js` 与 `version-check-smoke`（32 项） |
