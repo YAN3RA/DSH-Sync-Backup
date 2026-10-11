@@ -85,6 +85,19 @@ const toolsDir = runtimePkg("@deepseek-ai/dsh-tools");
 const toolsUrl = url(path.join(toolsDir, "lib", "index.js"));
 await ctx.plugin(pick(await import(toolsUrl)), { mode: "native" });
 
+// 真实宿主里 `credentials` 由 base bundle 提供，且**早于**插件就绪。这里照实装配它，
+// 否则本探针测的是「服务缺失」那条路径（表现为 run 卡在等待里），而不是真实运行形态。
+// 2026-10-11 教训：v4 的启动竞态正因为探针没装配该服务而长期没被发现。
+const credRow = all.find((e) => e.id === "credentials");
+if (credRow) {
+  const credMod = pick(await import(url(path.join(runtimePkg(credRow.name), "lib", "index.js"))));
+  await ctx.plugin(credMod, credMod.Config ? credMod.Config(credRow.config ?? {}) : (credRow.config ?? {}));
+  await new Promise((r) => setTimeout(r, 800));
+  console.log("[1b] credentials       =", typeof ctx.get("credentials"));
+} else {
+  console.log("[1b] credentials       = (profile 里没有该行，将走 fail-closed 路径)");
+}
+
 const plugin = pick(await import(url(path.join(PLUGIN_DIR, "index.js"))));
 await ctx.plugin(plugin, plugin.Config(row.config));
 await new Promise((r) => setTimeout(r, 1500));
