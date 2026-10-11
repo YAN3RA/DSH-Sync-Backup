@@ -7,6 +7,8 @@
 > 相关文档：[详细功能说明](README-详细说明.md) · [架构与不变量](docs/architecture.md) · [测试与验收](docs/testing.md) · [版本号方案](docs/VERSIONING.md)
 
 ---
+## 测试中
+插件功能还在破坏时迭代中，谨慎安装！！！
 
 ## 快速开始（安装）
 
