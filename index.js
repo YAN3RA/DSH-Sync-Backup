@@ -1216,8 +1216,34 @@ function apply(ctx, config) {
   if (config.enabled && config.schedulerEnabled) {
     ctx.effect(
       () => {
-        scheduler.start();
-        return () => scheduler.stop();
+        // v4 真机 P0（2026-10-11）：启动补跑会立刻发起一次备份，而那次备份要读本机 KEK
+        // —— 它依赖 base bundle 的 `credentials` 服务。实测该服务挂载晚于本插件，
+        // 于是第一次备份必然失败（v3 读明文 key.b64，不依赖宿主服务，所以从没暴露）。
+        //
+        // 处置：把「服务就绪」当成启动前提之一，就绪后再 start()。`ctx.inject` 在服务
+        // 已就绪时会同步回调、否则等到它挂载 —— 这正是我们要的时序，不需要轮询或猜。
+        // 服务始终不来时（旧宿主）仍会 start()：那时 hostKekStore 自己会 fail closed
+        // 并给出可读原因，而不是让定时器永远不跑。
+        let started = false;
+        let disposeInject;
+        const begin = () => {
+          if (started) return;
+          started = true;
+          scheduler.start();
+        };
+        if (typeof ctx.inject === "function") {
+          ctx.inject(["credentials"], () => begin());
+          // 兜底：若宿主没有 credentials 这个服务，inject 永不回调，定时器会一直不跑。
+          // 给一个短延时兜底启动；此时若真的没有服务，失败会以可读错误呈现。
+          const fallback = setTimeout(begin, 5000);
+          disposeInject = () => clearTimeout(fallback);
+        } else {
+          begin();
+        }
+        return () => {
+          disposeInject?.();
+          scheduler.stop();
+        };
       },
       "sync-backup.scheduler()",
     );

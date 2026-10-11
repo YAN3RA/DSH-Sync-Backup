@@ -610,9 +610,63 @@ await check("分支 A：宿主凭据服务缺失 → 显式失败（不静默退
   const dir = await tmpDir("dsh-sync-backup-key-");
   const noService = { get: () => undefined };
   await assert.rejects(
-    () => loadOrCreateKey(dir, { kek: hostKekStore(noService) }),
+    // readyTimeoutMs: 0 = 不等待（本断言测的是「真的没有服务」这条路径）
+    () => loadOrCreateKey(dir, { kek: hostKekStore(noService, { readyTimeoutMs: 0 }) }),
     (err) => err instanceof KeyError && err.code === "EKEYSTORE",
   );
+  await rmCase(dir);
+});
+
+/* ---- 3.4b 启动竞态：服务晚挂载（2026-10-11 真机 P0 回归） ----
+ *
+ * 真机现象：插件的启动补跑早于 base bundle 的 credentials 服务挂载，旧实现
+ * 当场 fail closed，备份直接失败（状态页显示「宿主凭据服务缺失」），而密钥与
+ * 服务其实都是好的。v3 不依赖宿主服务，所以从没暴露过。
+ *
+ * 这里钉住修复后的语义：**短暂未挂载要等待并恢复**，等待耗尽才 fail closed。
+ */
+await check("启动竞态：服务 200ms 后才挂载 → 等待并成功（不再当场失败）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-key-");
+  const host = fakeHost({ initial: undefined });
+  let ready = false;
+  // 模拟真实宿主：ctx.get 在服务挂载前返回 undefined
+  const lateCtx = { get: (name) => (name === "credentials" && ready ? host.ctx.get(name) : undefined) };
+  setTimeout(() => { ready = true; }, 200);
+
+  const store = hostKekStore(lateCtx, { readyTimeoutMs: 5000 });
+  const info = await loadOrCreateKey(dir, { kek: store });
+  assert.equal(info.created, true, "服务就绪后应正常完成首次生成");
+  assert.equal(await hasKey(dir), true, "应产出密钥文件");
+  // KEK 必须真的落到了宿主库里
+  assert.ok(host.records.has(LOCAL_KEK_KEY), "本机 KEK 应写入宿主凭据库");
+  await rmCase(dir);
+});
+
+await check("启动竞态：服务始终不来 → 等待超时后 fail closed（不无限挂起）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-key-");
+  const never = { get: () => undefined };
+  const t0 = Date.now();
+  await assert.rejects(
+    () => loadOrCreateKey(dir, { kek: hostKekStore(never, { readyTimeoutMs: 300 }) }),
+    (err) => err instanceof KeyError && err.code === "EKEYSTORE",
+  );
+  const waited = Date.now() - t0;
+  assert.ok(waited >= 250, `应至少等待约 300ms，实际 ${waited}ms`);
+  assert.ok(waited < 3000, `不该无限等待，实际 ${waited}ms`);
+  assert.equal(await hasKey(dir), false, "服务不可用时绝不产出密钥文件");
+  await rmCase(dir);
+});
+
+await check("启动竞态：超时错误文案说清「等待了多久」（可排障）", async () => {
+  const dir = await tmpDir("dsh-sync-backup-key-");
+  const never = { get: () => undefined };
+  try {
+    await loadOrCreateKey(dir, { kek: hostKekStore(never, { readyTimeoutMs: 0 }) });
+    assert.fail("应当抛错");
+  } catch (err) {
+    assert.ok(err instanceof KeyError && err.code === "EKEYSTORE");
+    assert.ok(/等待 \d+ ms/.test(err.message), `文案应含等待时长: ${err.message}`);
+  }
   await rmCase(dir);
 });
 
